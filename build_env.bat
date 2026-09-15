@@ -1,6 +1,6 @@
 @echo off
 rem ===== IMEStatus: shared MSVC x64 toolchain setup =====
-rem ASCII only: cmd.exe reads .bat as ANSI, non-ASCII breaks parsing.
+rem ASCII only + CRLF only: cmd.exe reads .bat as ANSI and LF-only breaks parsing.
 rem vcvars64.bat is avoided on purpose; paths are set explicitly instead,
 rem discovered from the VS install (works for any version).
 set "PFX86=C:\Program Files (x86)"
@@ -22,7 +22,7 @@ if not defined VS goto no_vs
 set "MSVCDIR="
 pushd "%VS%\VC\Tools\MSVC"
 if errorlevel 1 goto no_msvc
-rem 版本号最大的目录：dir /o-n 倒序，取第一条（装了多个工具集时别挑到最后那个）
+rem pick the highest version dir: dir /o-n is descending, first line wins
 for /f "delims=" %%d in ('dir /b /ad /o-n') do if not defined MSVCDIR set "MSVCDIR=%%d"
 popd
 if not defined MSVCDIR goto no_msvc
