@@ -261,7 +261,11 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
                 FgDesc(fg, 256);
                 if (wcscmp(fg, lastFg) != 0) {
                     lstrcpynW(lastFg, fg, 256);
-                    DbgLog(L"FG -> %s", fg);
+                    RECT wr = {0,0,0,0};
+                    HWND hf = ImeFocusedWindow();
+                    if (hf) GetWindowRect(hf, &wr);
+                    DbgLog(L"FG -> %s  winRect=(%d,%d)-(%d,%d)",
+                           fg, wr.left, wr.top, wr.right, wr.bottom);
                 }
                 DbgLog(L"state=%s want=1 caret=(%d,%d,h=%d) src=%s fg:%s",
                        StateName(cur), cp.x, cp.y, cp.h, SrcName(cp.source), fg);

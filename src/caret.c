@@ -66,14 +66,54 @@ static int ViaGuiInfo(CaretPos* out) {
     return 0;
 }
 
-/* 方法2：UIA TextPattern2::GetCaretRange（焦点元素） */
+/* 自 GetFocusedElement 向上（NVDA 式）找最近一个实现了指定文本模式的元素：
+   Chromium/WinUI 的焦点元素常是深处的子节点，文本模式与光标属于其祖先——
+   只在焦点元素上查 GetCaretRange/GetSelection 会拿到别的元素/过期的选区（漂移根因）。 */
+static IUIAutomationElement* UiaFindPattern(IUIAutomationElement* start, BOOL want2) {
+    IUIAutomationElement* e = start;
+    if (e) e->AddRef();
+    /* ControlView walker：向上导航（无则退回 RawView；两种都要不到父级就停） */
+    IUIAutomationTreeWalker* walker = NULL;
+    if (g_uia) g_uia->get_ControlViewWalker(&walker);
+    IUIAutomationTreeWalker* rawWalker = NULL;
+    if (g_uia) g_uia->get_RawViewWalker(&rawWalker);
+
+    for (int depth = 0; e && depth < 24; depth++) {
+        IUnknown* pat = NULL;
+        if (SUCCEEDED(e->GetCurrentPattern(want2 ? UIA_TextPattern2Id : UIA_TextPatternId, &pat)) && pat) {
+            pat->Release();
+            if (walker) walker->Release();
+            if (rawWalker) rawWalker->Release();
+            return e;                 /* 找到了，调用方持有引用 */
+        }
+        if (pat) pat->Release();
+        IUIAutomationElement* parent = NULL;
+        HRESULT hr = E_FAIL;
+        if (walker) hr = walker->GetParentElement(e, &parent);
+        if (FAILED(hr) || !parent) {
+            if (rawWalker) hr = rawWalker->GetParentElement(e, &parent);
+        }
+        if (FAILED(hr) || !parent) { e->Release(); e = NULL; break; }
+        e->Release();
+        e = parent;
+    }
+    if (e) e->Release();
+    if (walker) walker->Release();
+    if (rawWalker) rawWalker->Release();
+    return NULL;
+}
+
+/* 方法2：UIA TextPattern2::GetCaretRange（向上找文本节点） */
 static int ViaUiaCaretRange(CaretPos* out) {
     if (!g_uia) return 0;
     IUIAutomationElement* focus = NULL;
     if (FAILED(g_uia->GetFocusedElement(&focus)) || !focus) return 0;
+    IUIAutomationElement* el = UiaFindPattern(focus, TRUE);
+    focus->Release();
+    if (!el) return 0;
+    int ok = 0;
     IUnknown* pat = NULL;
-    BOOL ok = FALSE;
-    if (SUCCEEDED(focus->GetCurrentPattern(UIA_TextPattern2Id, &pat)) && pat) {
+    if (SUCCEEDED(el->GetCurrentPattern(UIA_TextPattern2Id, &pat)) && pat) {
         IUIAutomationTextPattern2* tp2 = NULL;
         if (SUCCEEDED(pat->QueryInterface(IID_PPV_ARGS(&tp2)))) {
             BOOL active = FALSE;
@@ -88,18 +128,21 @@ static int ViaUiaCaretRange(CaretPos* out) {
         }
         pat->Release();
     }
-    focus->Release();
-    return ok ? 1 : 0;
+    el->Release();
+    return ok;
 }
 
-/* 方法3：UIA TextPattern::GetSelection（Chromium 系） */
+/* 方法3：UIA TextPattern::GetSelection（向上找文本节点，Chromium 系） */
 static int ViaUiaSelection(CaretPos* out) {
     if (!g_uia) return 0;
     IUIAutomationElement* focus = NULL;
     if (FAILED(g_uia->GetFocusedElement(&focus)) || !focus) return 0;
-    IUnknown* pat = NULL;
+    IUIAutomationElement* el = UiaFindPattern(focus, FALSE);
+    focus->Release();
+    if (!el) return 0;
     int ok = 0;
-    if (SUCCEEDED(focus->GetCurrentPattern(UIA_TextPatternId, &pat)) && pat) {
+    IUnknown* pat = NULL;
+    if (SUCCEEDED(el->GetCurrentPattern(UIA_TextPatternId, &pat)) && pat) {
         IUIAutomationTextPattern* tp = NULL;
         if (SUCCEEDED(pat->QueryInterface(IID_PPV_ARGS(&tp)))) {
             IUIAutomationTextRangeArray* sel = NULL;
@@ -118,7 +161,7 @@ static int ViaUiaSelection(CaretPos* out) {
         }
         pat->Release();
     }
-    focus->Release();
+    el->Release();
     return ok;
 }
 
