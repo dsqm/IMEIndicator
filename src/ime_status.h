@@ -65,6 +65,7 @@ HWND   ImeFocusedWindow(void);  /* 前台线程的焦点窗口                */
 typedef enum {
     CARET_NONE = 0,
     CARET_GUIINFO,   /* 经典控件 caret 矩形 */
+    CARET_MSAA,      /* MSAA OBJID_CARET accLocation */
     CARET_UIA_CARET, /* UIA TextPattern2::GetCaretRange */
     CARET_UIA_SEL,   /* UIA TextPattern::GetSelection */
     CARET_IME        /* IME 组合窗口 */

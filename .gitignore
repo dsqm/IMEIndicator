@@ -1,6 +1,8 @@
 # 中间编译产物
 bin/*.obj
 *.obj
+# 可执行文件不入库
+IMEStatus.exe
 # 调试/临时文件
 _*
 log/

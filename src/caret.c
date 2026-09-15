@@ -2,6 +2,7 @@
 
 #include <uiautomationclient.h>
 #include <oleauto.h>
+#include <oleacc.h>   /* MSAA：AccessibleObjectFromWindow + accLocation */
 
 /* ================= 光标位置检测（多级策略） =================
    1) GUI 线程 caret 矩形（GetGUIThreadInfo，经典 Win32 编辑器）；
@@ -64,6 +65,30 @@ static int ViaGuiInfo(CaretPos* out) {
         }
     }
     return 0;
+}
+
+/* 前置声明：ViaMsaa 在 CaretPlausible 定义之前用到它 */
+static int CaretPlausible(const CaretPos* cp);
+
+/* 方法2：MSAA OBJID_CARET accLocation。
+   InputTip 依赖它得到「真实光标」，对 Chromium 等效果比 GetSelection 可靠。
+   返回的是绝对屏幕坐标（accLocation 约定）；部分控件给 (0,0) 假数据，
+   交给合理性过滤丢弃。 */
+static int ViaMsaa(CaretPos* out) {
+    HWND hwnd = GetForegroundWindow();
+    if (!hwnd) return 0;
+    IAccessible* acc = NULL;
+    if (FAILED(AccessibleObjectFromWindow(hwnd, (DWORD)(LONG)OBJID_CARET, IID_IAccessible, (void**)&acc)) || !acc)
+        return 0;
+    long x = 0, y = 0, w = 0, h = 0;
+    VARIANT child;
+    child.vt = VT_I4;
+    child.lVal = 0;                     /* CHILDID_SELF */
+    HRESULT hr = acc->accLocation(&x, &y, &w, &h, child);
+    acc->Release();
+    if (FAILED(hr)) return 0;
+    out->x = (int)x; out->y = (int)y; out->h = (int)h;
+    return CaretPlausible(out) ? 1 : 0;
 }
 
 /* 自 GetFocusedElement 向上（NVDA 式）找最近一个实现了指定文本模式的元素：
@@ -212,6 +237,7 @@ static int CaretPlausible(const CaretPos* cp) {
 static const WCHAR* CaretSrcName(CaretSource s) {
     switch (s) {
     case CARET_GUIINFO:   return L"guiinfo";
+    case CARET_MSAA:      return L"msaa";
     case CARET_UIA_CARET: return L"uia_caret";
     case CARET_UIA_SEL:   return L"uia_sel";
     case CARET_IME:       return L"ime";
@@ -233,6 +259,7 @@ int CaretGetPos(CaretPos* out) {
     out->found = 0;
     out->source = CARET_NONE;
     TRY_CHANNEL(ViaGuiInfo, CARET_GUIINFO);
+    TRY_CHANNEL(ViaMsaa, CARET_MSAA);
     TRY_CHANNEL(ViaUiaCaretRange, CARET_UIA_CARET);
     TRY_CHANNEL(ViaUiaSelection, CARET_UIA_SEL);
     TRY_CHANNEL(ViaIme, CARET_IME);
