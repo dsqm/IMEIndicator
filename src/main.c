@@ -166,22 +166,22 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
         ULONGLONG now = GetTickCount64();
         if (now - lastPoll >= (ULONGLONG)pollMs) {
             lastPoll = now;
-            if (ImeIsCapsLock()) cur = IMEST_CAPS;
+            if (ImeIsCapsLock())            cur = IMEST_CAPS;
             else if (ImeIsEnglishKeyboard()) cur = IMEST_KBD_EN;
-            else cur = IMEST_EN;   /* 中文输入法 / 其它布局：默认英文色（用户可不区分） */
+            else if (ImeIsChineseMode())    cur = IMEST_HIDDEN;  /* 中文输入：不显示 */
+            else                            cur = IMEST_EN;      /* 中文输入法英文档 */
             DWORD color, alpha = g_cfg.dotAlpha;
             switch (cur) {
             case IMEST_CAPS:   color = g_cfg.capsrgb;   break;
             case IMEST_KBD_EN: color = g_cfg.kbdEnrgb;  break;
-            default:           color = g_cfg.cnrgb;     break; /* 默认=En 橘色 */
+            default:           color = g_cfg.cnrgb;     break; /* 显隐由下面 want 决定 */
             }
             OverlaySetColor(color, alpha);
         }
 
-        /* 英文态 / 中文不区分态 受 ShowWhenEnglish 控制；
-           大写键始终显示 */
-        int want = 1;
-        if (cur != IMEST_CAPS && !g_cfg.showEn) want = 0;
+        /* 中文输入不显示；英文/英文键盘受 ShowWhenEnglish 控制；大写键始终显示 */
+        int want = (cur == IMEST_CAPS) ||
+                   ((cur == IMEST_EN || cur == IMEST_KBD_EN) && g_cfg.showEn);
 
         /* 光标追踪：找到就跟随，找不到就隐藏 */
         CaretPos cp;

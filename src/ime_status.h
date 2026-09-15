@@ -49,6 +49,7 @@ int    CfgBlockedForeground(void); /* 前台程序进程名是否命中 [Ignore]
 
 /* ---- ime.c ---- */
 int    ImeIsCapsLock(void);     /* Caps Lock 是否开启                */
+int    ImeIsChineseMode(void);  /* 焦点 IME 是否处于中文组合状态        */
 int    ImeIsEnglishKeyboard(void); /* 前台键盘布局是否英文语言（主语言 0x09） */
 HWND   ImeFocusedWindow(void);  /* 前台线程的焦点窗口                */
 
