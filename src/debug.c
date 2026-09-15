@@ -25,12 +25,12 @@ void DbgInit(void) {
     }
 }
 
-/* 打开本次会话的日志文件：log\IMEStatus-<时间>.log。
+/* 打开本次会话的日志文件：<exe目录>\log\IMEStatus-<时间>.log。
    目录不存在就建；文件用 "w"（新建），一次会话一个、不会跨启动追加。 */
 static void DebugOpen(void) {
     if (!g_dir[0]) return;
     WCHAR dir[MAX_PATH];
-    _snwprintf_s(dir, MAX_PATH, _TRUNCATE, L"%slog", g_dir);
+    _snwprintf_s(dir, MAX_PATH, _TRUNCATE, L"%s\\log", g_dir);
     CreateDirectoryW(dir, NULL);   /* 已存在则忽略 */
     SYSTEMTIME st;
     GetLocalTime(&st);

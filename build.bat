@@ -13,7 +13,7 @@ rem COM / UIAutomation calls (p->Method()) compile without CINTERFACE macros.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Fobin\ ^
    src\main.c src\config.c src\ime.c src\caret.c src\overlay.c src\debug.c ^
-   /link /OUT:bin/IMEStatus.exe ^
+   /link /OUT:IMEStatus.exe ^
    user32.lib gdi32.lib shell32.lib ole32.lib oleaut32.lib imm32.lib comctl32.lib ^
    /SUBSYSTEM:WINDOWS
 
@@ -22,4 +22,4 @@ if errorlevel 1 (
     exit /b 1
 )
 
-for %%F in (bin\IMEStatus.exe) do echo [OK] bin/IMEStatus.exe built. size=%%~zF bytes
+for %%F in (IMEStatus.exe) do echo [OK] IMEStatus.exe built. size=%%~zF bytes
