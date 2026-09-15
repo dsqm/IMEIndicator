@@ -142,14 +142,53 @@ static int ViaIme(CaretPos* out) {
     return ok;
 }
 
+/* 合理性过滤：真光标必定落在前台窗口附近。
+   某些通道（尤其 Chromium 的 UIA Selection）会返回与光标无关的坐标
+   （焦点元素不对 / 返回的是选区外框）→ 点会跳到"离光标很远"的地方。
+   这里要求坐标落在前台窗口屏幕矩形（各向外放一个窗口宽高）之内，
+   超出即丢弃，让上层走下一通道或直接隐藏，而不是把点摆到远处。 */
+static int CaretPlausible(const CaretPos* cp) {
+    HWND fg = GetForegroundWindow();
+    if (!fg) return 1;
+    RECT r;
+    if (!GetWindowRect(fg, &r)) return 1;
+    int mw = r.right - r.left;
+    int mh = r.bottom - r.top;
+    if (mw < 1) mw = GetSystemMetrics(SM_CXSCREEN);
+    if (mh < 1) mh = GetSystemMetrics(SM_CYSCREEN);
+    return cp->x >= (long)(r.left - mw) && cp->x <= (long)(r.right + mw) &&
+           cp->y >= (long)(r.top - mh)  && cp->y <= (long)(r.bottom + mh);
+}
+
+static const WCHAR* CaretSrcName(CaretSource s) {
+    switch (s) {
+    case CARET_GUIINFO:   return L"guiinfo";
+    case CARET_UIA_CARET: return L"uia_caret";
+    case CARET_UIA_SEL:   return L"uia_sel";
+    case CARET_IME:       return L"ime";
+    default:              return L"none";
+    }
+}
+
+#define TRY_CHANNEL(detector, src)                                            \
+    do {                                                                      \
+        if (detector(out)) {                                                  \
+            if (CaretPlausible(out)) { out->source = (src); goto done; }      \
+            DbgLog(L"reject %s caret=(%d,%d,h=%d)", CaretSrcName(src),        \
+                   out->x, out->y, out->h);                                   \
+        }                                                                     \
+    } while (0)
+
 int CaretGetPos(CaretPos* out) {
     EnsureUia();
     out->found = 0;
     out->source = CARET_NONE;
-    if (ViaGuiInfo(out))         out->source = CARET_GUIINFO;
-    else if (ViaUiaCaretRange(out)) out->source = CARET_UIA_CARET;
-    else if (ViaUiaSelection(out)) out->source = CARET_UIA_SEL;
-    else if (ViaIme(out))        out->source = CARET_IME;
+    TRY_CHANNEL(ViaGuiInfo, CARET_GUIINFO);
+    TRY_CHANNEL(ViaUiaCaretRange, CARET_UIA_CARET);
+    TRY_CHANNEL(ViaUiaSelection, CARET_UIA_SEL);
+    TRY_CHANNEL(ViaIme, CARET_IME);
+done:
     if (out->source != CARET_NONE) { out->found = 1; return 1; }
+    out->x = out->y = out->h = 0;
     return 0;
 }
