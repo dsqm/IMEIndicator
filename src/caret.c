@@ -1,4 +1,4 @@
-#include "ime_status.h"
+#include "ime_indicator.h"
 
 #include <uiautomationclient.h>
 #include <oleauto.h>

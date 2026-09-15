@@ -1,4 +1,4 @@
-/* IMEStatus —— 输入法状态提示（光标左下角圆点）
+/* IMEIndicator —— 输入法状态提示（光标左下角圆点）
  * COPYRIGHT (C) 2026 qm  GPL v3
  */
 #ifndef IMESTATUS_H
@@ -17,6 +17,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "imm32.lib")
+#pragma comment(lib, "advapi32.lib")   /* 进程令牌：OpenProcessToken / GetTokenInformation */
 
 /* 颜色以 0x00RRGGBB 存放（不透明）；透明度统一用 Alpha。
    ★ "不显示该状态"用哨兵 IME_COLOR_NONE 表示，不能用 0 —— 0 是**黑色**，
@@ -51,7 +52,7 @@ typedef enum {
 } ImeState;
 
 /* ---- config.c ---- */
-void   CfgLoad(ImeCfg* c);      /* 读 IMEStatus.ini（缺则写模板） */
+void   CfgLoad(ImeCfg* c);      /* 读 IMEIndicator.ini（缺则写模板） */
 void   CfgPath(WCHAR* out, size_t cap); /* 配置文件完整路径（托盘「打开配置」用） */
 int    CfgBlockedForeground(void); /* 前台程序进程名是否命中 [Ignore] */
 
@@ -68,6 +69,7 @@ int    ImeIsChineseMode(void);  /* 焦点 IME 是否处于中文组合状态    
 int    ImeIsEnglishKeyboard(void); /* 前台键盘布局是否英文语言（主语言 0x09） */
 HWND   ImeFocusedWindow(void);  /* 前台线程的焦点窗口                */
 int    ImeKeyboardLang(void);   /* 前台键盘布局主语言 ID（0x04/0x09/0x11/0x12…）；无前台窗口返回 -1 */
+int    ProcIsElevated(void);    /* 本进程是否以管理员运行（查进程令牌） */
 
 /* 一次中英探测拿到的原始信号与判定依据（日志诊断用）。
    不同输入法暴露的开关不一样：有的只动 open 状态、有的只动转换模式、

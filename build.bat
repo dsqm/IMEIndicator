@@ -1,5 +1,5 @@
 @echo off
-rem ===== IMEStatus portable build script (MSVC x64) =====
+rem ===== IMEIndicator portable build script (MSVC x64) =====
 rem ASCII only (cmd.exe reads .bat as ANSI).
 setlocal
 
@@ -13,8 +13,8 @@ rem COM / UIAutomation calls (p->Method()) compile without CINTERFACE macros.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Fobin\ ^
    src\main.c src\config.c src\ime.c src\caret.c src\overlay.c src\debug.c ^
-   /link /OUT:bin/IMEStatus.exe ^
-   user32.lib gdi32.lib shell32.lib ole32.lib oleaut32.lib imm32.lib oleacc.lib comctl32.lib ^
+   /link /OUT:bin/IMEIndicator.exe ^
+   user32.lib gdi32.lib shell32.lib ole32.lib oleaut32.lib imm32.lib oleacc.lib comctl32.lib advapi32.lib ^
    /SUBSYSTEM:WINDOWS
 
 if errorlevel 1 (
@@ -22,4 +22,4 @@ if errorlevel 1 (
     exit /b 1
 )
 
-for %%F in (bin\IMEStatus.exe) do echo [OK] bin/IMEStatus.exe built. size=%%~zF bytes
+for %%F in (bin\IMEIndicator.exe) do echo [OK] bin/IMEIndicator.exe built. size=%%~zF bytes

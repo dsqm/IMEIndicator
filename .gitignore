@@ -2,11 +2,11 @@
 bin/*.obj
 *.obj
 # 可执行文件不入库
-IMEStatus.exe
+IMEIndicator.exe
 # 调试/临时文件
 _*
 log/
 bin/*.log
 # 运行期生成的配置模板（首次运行在 exe 同目录自动生成）
-IMEStatus.ini
-bin/IMEStatus.ini
+IMEIndicator.ini
+bin/IMEIndicator.ini

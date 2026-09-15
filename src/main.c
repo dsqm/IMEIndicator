@@ -1,4 +1,4 @@
-#include "ime_status.h"
+#include "ime_indicator.h"
 #include <stdlib.h>  /* calloc / free */
 #include <stdio.h>   /* _snwprintf_s */
 #include <wchar.h>   /* wcscmp */
@@ -15,11 +15,12 @@ volatile LONG g_showDot = 0;
 #define IDM_RESTART 1001
 #define IDM_EXIT    1002
 #define IDM_LOG     1003
-
-static HWND g_trayWnd = NULL;
-static HICON g_icon = NULL;
-
 #define IDM_OPENCFG 1004
+
+static HWND  g_trayWnd = NULL;
+static HICON g_icon = NULL;
+static UINT  g_msgTaskbarCreated = 0;   /* explorer 重启通知 */
+static const WCHAR* APP_NAME = L"IMEIndicator";
 
 /* ---------- DPI 感知：必须在建任何窗口之前 ---------- */
 static void SetDpiAwareness(void) {
@@ -139,7 +140,7 @@ static void FgDesc(WCHAR* out, size_t cap) {
 static HANDLE g_single = NULL;
 
 static int SingleInstanceAcquire(void) {
-    g_single = CreateMutexW(NULL, FALSE, L"IMEStatus_SingleInstance");
+    g_single = CreateMutexW(NULL, FALSE, L"IMEIndicator_SingleInstance");
     if (!g_single) return 1;                       /* 建不了就照常跑，别把程序卡死 */
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(g_single);
@@ -163,7 +164,13 @@ static void RestartApp(void) {
     PostQuitMessage(0);
 }
 
+static void TrayAddIcon(void);   /* 前向声明：explorer 重启时要重新挂图标 */
+
 static LRESULT CALLBACK TrayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    /* explorer 重启：系统把整个通知区清空，图标连同悬停提示一起没了，
+       必须自己重新挂上。提示文案是**静态**的（名字 + 权限），所以重新
+       ADD 时写进去就是完整文案 —— 不需要"按状态重建提示"那套逻辑。 */
+    if (g_msgTaskbarCreated && m == g_msgTaskbarCreated) { TrayAddIcon(); return 0; }
     if (m == WM_TRAYICON) {
         if (l == WM_RBUTTONUP) { ShowTrayMenu(); return 0; }
     } else if (m == WM_COMMAND) {
@@ -183,24 +190,12 @@ static LRESULT CALLBACK TrayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-static void TrayInstall(void) {
-    HINSTANCE hi = GetModuleHandleW(NULL);
-    static const WCHAR cls[] = L"IMEStatusTray";
-    WNDCLASSW wc;
-    ZeroMemory(&wc, sizeof(wc));
-    wc.lpfnWndProc = TrayWndProc;
-    wc.hInstance = hi;
-    wc.lpszClassName = cls;
-    RegisterClassW(&wc);
-
-    g_trayWnd = CreateWindowExW(0, cls, L"IMEStatus",
-                                WS_OVERLAPPEDWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1, 1,
-                                NULL, NULL, hi, NULL);
+/* 悬停提示：程序名 + 权限标注。
+   权限查**进程令牌**而不是配置值 —— 配置与实际不一致时不会误导。
+   文案是静态的（两个信息都不会变），所以只要每次挂图标都写完整文案，
+   explorer 重启后重新挂也自然正确。 */
+static void TrayAddIcon(void) {
     if (!g_trayWnd) return;
-
-    g_icon = MakeTrayIcon();
-
     NOTIFYICONDATAW nid;
     ZeroMemory(&nid, sizeof(nid));
     nid.cbSize = sizeof(nid);
@@ -209,10 +204,29 @@ static void TrayInstall(void) {
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
     nid.hIcon = g_icon ? g_icon : LoadIconW(NULL, IDI_APPLICATION);
-    const WCHAR* tip = L"输入法状态";
-    for (int i = 0; tip[i] && i < (int)(sizeof(nid.szTip) / sizeof(WCHAR)) - 1; i++)
-        nid.szTip[i] = tip[i];
+    _snwprintf_s(nid.szTip, sizeof(nid.szTip) / sizeof(WCHAR), _TRUNCATE,
+                 L"%s%s", APP_NAME, ProcIsElevated() ? L"（管理员）" : L"");
     Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+static void TrayInstall(void) {
+    HINSTANCE hi = GetModuleHandleW(NULL);
+    static const WCHAR cls[] = L"IMEIndicatorTray";
+    WNDCLASSW wc;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = TrayWndProc;
+    wc.hInstance = hi;
+    wc.lpszClassName = cls;
+    RegisterClassW(&wc);
+
+    g_trayWnd = CreateWindowExW(0, cls, APP_NAME,
+                                WS_OVERLAPPEDWINDOW,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1, 1,
+                                NULL, NULL, hi, NULL);
+    if (!g_trayWnd) return;
+
+    if (!g_icon) g_icon = MakeTrayIcon();
+    TrayAddIcon();
 }
 
 static void TrayRemove(void) {
@@ -384,6 +398,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     if (!SingleInstanceAcquire()) return 0;   /* 已有一个实例在跑，直接退出 */
 
+    g_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     SetDpiAwareness();          /* 必须最早 */
     DbgInit();
 

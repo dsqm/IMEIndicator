@@ -1,4 +1,4 @@
-#include "ime_status.h"
+#include "ime_indicator.h"
 #include <stdio.h>
 #include <wchar.h>
 #include <stdarg.h>
@@ -6,7 +6,7 @@
 /* ================= 调试日志 =================
    托盘「记录日志」开关把 g_logging 置 1 后，检测线程每次循环写一行。
    日志写到 exe 同目录 log\ 子目录，每个进程会话**新建一个**以时间命名的
-   文件（log\IMEStatus-YYYYMMDD-HHMMSS.log），一次会话一个文件，
+   文件（log\IMEIndicator-YYYYMMDD-HHMMSS.log），一次会话一个文件，
    不会无限追加变长。只有检测线程写文件，托盘切换只翻 g_logging 标志，
    避免跨线程文件句柄竞争。 */
 
@@ -28,7 +28,7 @@ void DbgInit(void) {
 /* 单个日志文件上限：超了就换一个新文件（心跳 2 行/秒，开一整夜也不至于涨到几百 MB） */
 #define DBG_MAX_BYTES (4LL * 1024 * 1024)
 
-/* 打开本次会话的日志文件：<exe目录>\log\IMEStatus-<时间>.log。
+/* 打开本次会话的日志文件：<exe目录>\log\IMEIndicator-<时间>.log。
    目录不存在就建；文件用 "w"（新建），一次会话一个、不会跨启动追加。
    log 子目录建不起来（例如装在只读目录）时退回 exe 同目录，别静默不写。 */
 static void DebugOpen(void) {
@@ -44,7 +44,7 @@ static void DebugOpen(void) {
     GetLocalTime(&st);
     WCHAR path[MAX_PATH];
     _snwprintf_s(path, MAX_PATH, _TRUNCATE,
-                 L"%s\\IMEStatus-%04u%02u%02u-%02u%02u%02u.log",
+                 L"%s\\IMEIndicator-%04u%02u%02u-%02u%02u%02u.log",
                  base, st.wYear, st.wMonth, st.wDay,
                  st.wHour, st.wMinute, st.wSecond);
     _wfopen_s(&g_fp, path, L"w, ccs=UTF-8");

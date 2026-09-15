@@ -1,4 +1,4 @@
-#include "ime_status.h"
+#include "ime_indicator.h"
 
 /* ================= 悬浮圆点窗口 =================
    WS_EX_LAYERED + WS_EX_TRANSPARENT + WS_EX_TOPMOST + WS_EX_NOACTIVATE：
@@ -34,7 +34,7 @@ void OverlayInit(ImeCfg* c) {
     g_alpha = (BYTE)c->dotAlpha;
 
     HINSTANCE hi = GetModuleHandleW(NULL);
-    static const WCHAR cls[] = L"IMEStatusOverlay";
+    static const WCHAR cls[] = L"IMEIndicatorOverlay";
     WNDCLASSW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.lpfnWndProc = OverlayWndProc;
@@ -46,7 +46,7 @@ void OverlayInit(ImeCfg* c) {
     g_hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
         WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-        cls, L"IMEStatus", WS_POPUP,
+        cls, L"IMEIndicator", WS_POPUP,
         -100, -100, sz, sz, NULL, NULL, hi, NULL);
     if (g_hwnd) {
         /* 初始为全透明占位，避免闪出白块 */

@@ -1,5 +1,5 @@
 @echo off
-rem ===== IMEStatus: shared MSVC x64 toolchain setup =====
+rem ===== IMEIndicator: shared MSVC x64 toolchain setup =====
 rem ASCII only + CRLF only: cmd.exe reads .bat as ANSI and LF-only breaks parsing.
 rem vcvars64.bat is avoided on purpose; paths are set explicitly instead,
 rem discovered from the VS install (works for any version).

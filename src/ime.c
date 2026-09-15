@@ -1,4 +1,4 @@
-#include "ime_status.h"
+#include "ime_indicator.h"
 
 /* 某些 Windows SDK 的 imm.h 未定义 IMC_GETCONVERSIONMODE，这里按标准值补上 */
 #ifndef IMC_GETCONVERSIONMODE
@@ -34,6 +34,38 @@ int ImeIsCapsLock(void) {
     return (GetKeyState(VK_CAPITAL) & 1) ? 1 : 0;
 }
 
+/* ---------- 运行权限（查进程令牌，不看配置值） ---------- */
+static int TokenElevated(HANDLE hProc) {
+    HANDLE tok = NULL;
+    int el = 0;
+    if (OpenProcessToken(hProc, TOKEN_QUERY, &tok)) {
+        TOKEN_ELEVATION e;
+        DWORD sz = 0;
+        if (GetTokenInformation(tok, TokenElevation, &e, sizeof(e), &sz))
+            el = e.TokenIsElevated ? 1 : 0;
+        CloseHandle(tok);
+    }
+    return el;   /* 取不到就按"非管理员"处理：宁可少标，不要乱标 */
+}
+
+/* 本进程是否以管理员运行（托盘提示据此标注）—— 进程级信息，查一次即可 */
+int ProcIsElevated(void) {
+    static int cached = -1;
+    if (cached < 0) cached = TokenElevated(GetCurrentProcess());
+    return cached;
+}
+
+/* 指定窗口所属进程是否提权：用于判断"查询失败是不是 UIPI 挡的" */
+static int WindowProcElevated(HWND hwnd) {
+    DWORD pid = 0;
+    if (!hwnd || !GetWindowThreadProcessId(hwnd, &pid) || !pid) return 0;
+    HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hp) return 0;
+    int el = TokenElevated(hp);
+    CloseHandle(hp);
+    return el;
+}
+
 /* 取 IME 窗口：焦点窗口拿不到（UWP / 部分自绘控件 / 权限更高进程）时逐级退，
    最后退回本线程的默认 IME 窗口，别一上来就判"查不到"=英文。 */
 static HWND FindImeWindow(HWND focus) {
@@ -46,6 +78,8 @@ static HWND FindImeWindow(HWND focus) {
     if (!ime) ime = ImmGetDefaultIMEWnd(NULL);
     return ime;
 }
+
+static void WarnUipiOnce(void);   /* 前向声明：ImeQuery 用到 */
 
 /* 向 IME 窗口问一次 open 状态与转换模式。**两项都取到才算 ok**：
    只取到一项时另一项仍是 -1，而 (-1 & IME_CMODE_NATIVE) 为真 → 会误判成中文，
@@ -64,7 +98,22 @@ static int ImeQuery(HWND focus, int* opened, int* conv) {
                             SMTO_ABORTIFHUNG, IME_QUERY_TIMEOUT_MS, &v)) {
         *conv = (int)v; gotConv = 1;
     }
-    return (gotOpen && gotConv) ? 1 : 0;
+    if (!gotOpen || !gotConv) {
+        /* 非管理员的我们向**管理员**窗口发消息会被 UIPI 静默拦掉（无任何报错），
+           现象是"在某些程序里圆点不跟随"。查一下对方权限，命中就记日志提示。 */
+        if (!ProcIsElevated() && WindowProcElevated(ime)) WarnUipiOnce();
+        return 0;
+    }
+    return 1;
+}
+
+/* 同一条提示别刷屏：最多 60 秒记一次 */
+static void WarnUipiOnce(void) {
+    static ULONGLONG last = 0;
+    ULONGLONG now = GetTickCount64();
+    if (last && now - last < 60000) return;
+    last = now;
+    DbgLog(L"UIPI: 目标程序以更高权限运行，IME 查询被系统拦截 —— 建议以管理员启动本程序");
 }
 
 /* ---------- 自适应判定 ----------

@@ -1,9 +1,9 @@
-#include "ime_status.h"
+#include "ime_indicator.h"
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
 
-/* ================= 配置模块（IMEStatus.ini，与 exe 同目录） =================
+/* ================= 配置模块（IMEIndicator.ini，与 exe 同目录） =================
    INI 风格，UTF-8 编码；`;` 开头为注释，空行忽略，[段名] 切段。
    [General]   键值项（Key = Value）
    [Colors]    三/四状态颜色（#RRGGBB 或 #RRGGBBAA）+ 全局透明度
@@ -88,7 +88,7 @@ static void SrcOfPath(WCHAR* out, size_t cap) {
     WCHAR* slash=NULL;
     for (DWORD i=0;i<n;i++) if (exe[i]==L'\\') slash=&exe[i];
     if (slash) *slash=0;
-    _snwprintf_s(out, cap, _TRUNCATE, L"%s\\IMEStatus.ini", exe);
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s\\IMEIndicator.ini", exe);
 }
 
 #define ISAME(s,w) (_stricmp(s,w)==0)
@@ -109,7 +109,7 @@ void CfgLoad(ImeCfg* c) {
     if (_wfopen_s(&f, path, L"rb")!=0 || !f) {
         /* 文件不存在：写模板 */
         static const char kTpl[] =
-            "; IMEStatus 配置文件（UTF-8，与 exe 同目录）\n"
+            "; IMEIndicator 配置文件（UTF-8，与 exe 同目录）\n"
             "; `;` 开头为注释（空行忽略）。改动后重启程序生效。\n"
             "[General]\n"
             ";\n"
