@@ -47,6 +47,12 @@ typedef enum {
 void   CfgLoad(ImeCfg* c);      /* 读 IMEStatus.ini（缺则写模板） */
 int    CfgBlockedForeground(void); /* 前台程序进程名是否命中 [Ignore] */
 
+/* ---- debug.c ---- */
+extern volatile LONG g_logging; /* 托盘「记录日志」开关（1=写 log） */
+void   DbgInit(void);           /* 启动时取 exe 目录（供日志文件路径） */
+void   DbgLog(const WCHAR* fmt, ...); /* 开启时追加一行日志（仅检测线程调） */
+void   DbgShutdown(void);       /* 关闭日志文件 */
+
 /* ---- ime.c ---- */
 int    ImeIsCapsLock(void);     /* Caps Lock 是否开启                */
 int    ImeIsChineseMode(void);  /* 焦点 IME 是否处于中文组合状态        */
@@ -54,7 +60,15 @@ int    ImeIsEnglishKeyboard(void); /* 前台键盘布局是否英文语言（主
 HWND   ImeFocusedWindow(void);  /* 前台线程的焦点窗口                */
 
 /* ---- caret.c ---- */
-typedef struct { int x, y, h; int found; } CaretPos;
+/* 本次坐标由哪条通道提供（日志诊断漂移用） */
+typedef enum {
+    CARET_NONE = 0,
+    CARET_GUIINFO,   /* 经典控件 caret 矩形 */
+    CARET_UIA_CARET, /* UIA TextPattern2::GetCaretRange */
+    CARET_UIA_SEL,   /* UIA TextPattern::GetSelection */
+    CARET_IME        /* IME 组合窗口 */
+} CaretSource;
+typedef struct { int x, y, h; int found; CaretSource source; } CaretPos;
 int    CaretGetPos(CaretPos* out);   /* 0=失败 1=成功，坐标=屏幕物理像素 */
 
 /* ---- overlay.c ---- */

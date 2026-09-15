@@ -145,10 +145,11 @@ static int ViaIme(CaretPos* out) {
 int CaretGetPos(CaretPos* out) {
     EnsureUia();
     out->found = 0;
-    if (ViaGuiInfo(out) || ViaUiaCaretRange(out) ||
-        ViaUiaSelection(out) || ViaIme(out)) {
-        out->found = 1;
-        return 1;
-    }
+    out->source = CARET_NONE;
+    if (ViaGuiInfo(out))         out->source = CARET_GUIINFO;
+    else if (ViaUiaCaretRange(out)) out->source = CARET_UIA_CARET;
+    else if (ViaUiaSelection(out)) out->source = CARET_UIA_SEL;
+    else if (ViaIme(out))        out->source = CARET_IME;
+    if (out->source != CARET_NONE) { out->found = 1; return 1; }
     return 0;
 }

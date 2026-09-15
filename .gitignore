@@ -3,5 +3,6 @@ bin/*.obj
 *.obj
 # 调试/临时文件
 _*
+log/
 # 运行期生成的配置模板（首次运行在 exe 同目录自动生成）
 bin/IMEStatus.ini

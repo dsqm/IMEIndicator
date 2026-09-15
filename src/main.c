@@ -1,5 +1,7 @@
 #include "ime_status.h"
 #include <stdlib.h>  /* calloc / free */
+#include <stdio.h>   /* _snwprintf_s */
+#include <wchar.h>   /* wcscmp */
 
 /* ================= 主程序：托盘 + 检测线程 =================
    主线程：隐藏托盘宿主窗口的消息循环（托盘点右键 -> 重启/退出）。
@@ -12,6 +14,7 @@ volatile LONG g_showDot = 0;
 #define WM_TRAYICON (WM_APP + 1)
 #define IDM_RESTART 1001
 #define IDM_EXIT    1002
+#define IDM_LOG     1003
 
 static HWND g_trayWnd = NULL;
 static HICON g_icon = NULL;
@@ -67,15 +70,42 @@ static HICON MakeTrayIcon(DWORD rgb) {
 /* ---------- 托盘菜单 ---------- */
 static void ShowTrayMenu(void) {
     HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, IDM_LOG, L"记录日志");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_RESTART, L"重启");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_EXIT, L"退出");
+    CheckMenuItem(m, IDM_LOG, g_logging ? MF_CHECKED : MF_UNCHECKED);
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(g_trayWnd);
     TrackPopupMenu(m, TPM_LEFTALIGN | TPM_BOTTOMALIGN,
                    pt.x, pt.y, 0, g_trayWnd, NULL);
     DestroyMenu(m);
+}
+
+/* 前台焦点窗口的描述串："[窗口类] 进程名"  —— 诊断哪个程序漂移用 */
+static void FgDesc(WCHAR* out, size_t cap) {
+    out[0] = 0;
+    HWND f = ImeFocusedWindow();
+    if (!f) { _snwprintf_s(out, cap, _TRUNCATE, L"[null]"); return; }
+    WCHAR cls[128] = L"", proc[MAX_PATH] = L"";
+    GetClassNameW(f, cls, 128);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(f, &pid);
+    if (pid) {
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (h) {
+            DWORD sz = MAX_PATH; WCHAR p[MAX_PATH];
+            if (QueryFullProcessImageNameW(h, 0, p, &sz)) {
+                WCHAR* s = p;
+                for (WCHAR* q = p; *q; q++) if (*q == L'\\') s = q + 1;
+                lstrcpynW(proc, s, MAX_PATH);
+            }
+            CloseHandle(h);
+        }
+    }
+    _snwprintf_s(out, cap, _TRUNCATE, L"[%s] %s", cls, proc);
 }
 
 static void RestartApp(void) {
@@ -92,6 +122,9 @@ static LRESULT CALLBACK TrayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         switch (LOWORD(w)) {
         case IDM_RESTART: RestartApp(); return 0;
         case IDM_EXIT:    PostQuitMessage(0); return 0;
+        case IDM_LOG:
+            InterlockedExchange(&g_logging, g_logging ? 0 : 1);
+            return 0;
         }
         return 0;
     } else if (m == WM_DESTROY) {
@@ -144,6 +177,26 @@ static void TrayRemove(void) {
     if (g_icon) { DestroyIcon(g_icon); g_icon = NULL; }
 }
 
+/* 来源名（日志用） */
+static const WCHAR* SrcName(CaretSource s) {
+    switch (s) {
+    case CARET_GUIINFO:   return L"guiinfo";
+    case CARET_UIA_CARET: return L"uia_caret";
+    case CARET_UIA_SEL:   return L"uia_sel";
+    case CARET_IME:       return L"ime";
+    default:              return L"none";
+    }
+}
+static const WCHAR* StateName(ImeState s) {
+    switch (s) {
+    case IMEST_CAPS:   return L"CAPS";
+    case IMEST_KBD_EN: return L"KBD_EN";
+    case IMEST_HIDDEN: return L"HIDDEN";
+    case IMEST_EN:     return L"EN";
+    default:           return L"?";
+    }
+}
+
 /* ---------- 检测线程 ---------- */
 static DWORD WINAPI DetectorThread(LPVOID param) {
     (void)param;
@@ -151,13 +204,26 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
     ULONGLONG lastPoll = 0;
     int shown = 0;
     ImeState cur = IMEST_EN;
+    int wasLogging = 0;
+    WCHAR lastFg[256] = L"";
 
     for (;;) {
         Sleep(trackMs > 0 ? (DWORD)trackMs : 15);
         if (g_showDot < 0) break;   /* 退出信号 */
 
+        /* 日志开关上升沿：先写一版环境头（DPI + 焦点），便于定位坐标空间 */
+        if (g_logging && !wasLogging) {
+            HDC hdc = GetDC(NULL);
+            int dpi = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 0;
+            if (hdc) ReleaseDC(NULL, hdc);
+            FgDesc(lastFg, 256);
+            DbgLog(L"== logging on  screenDPI=%d fg:%s (process DPI-aware per-monitor)", dpi, lastFg);
+        }
+        wasLogging = g_logging ? 1 : 0;
+
         /* 黑名单：前台程序命中 -> 整段隐藏 */
         if (CfgBlockedForeground()) {
+            if (g_logging) DbgLog(L"BLOCKED (ignore-list)");
             if (shown) { OverlaySetVisible(0); shown = 0; }
             continue;
         }
@@ -186,9 +252,21 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
         /* 光标追踪：找到就跟随，找不到就隐藏 */
         CaretPos cp;
         if (want && CaretGetPos(&cp)) {
+            if (g_logging) {
+                WCHAR fg[256];
+                FgDesc(fg, 256);
+                if (wcscmp(fg, lastFg) != 0) {
+                    lstrcpynW(lastFg, fg, 256);
+                    DbgLog(L"FG -> %s", fg);
+                }
+                DbgLog(L"state=%s want=1 caret=(%d,%d,h=%d) src=%s fg:%s",
+                       StateName(cur), cp.x, cp.y, cp.h, SrcName(cp.source), fg);
+            }
             if (!shown) { OverlaySetVisible(1); shown = 1; }
             OverlayMove(cp.x, cp.y + cp.h);
         } else {
+            if (g_logging && shown)
+                DbgLog(L"hide state=%s want=%d", StateName(cur), want);
             if (shown) { OverlaySetVisible(0); shown = 0; }
         }
     }
@@ -200,6 +278,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     (void)hInst; (void)hPrev; (void)lpCmd; (void)nShow;
 
     SetDpiAwareness();          /* 必须最早 */
+    DbgInit();
 
     ZeroMemory(&g_cfg, sizeof(g_cfg));
     CfgLoad(&g_cfg);            /* 缺配置时在 exe 同目录生成模板 */
