@@ -51,7 +51,8 @@ int    CfgBlockedForeground(void); /* 前台程序进程名是否命中 [Ignore]
 extern volatile LONG g_logging; /* 托盘「记录日志」开关（1=写 log） */
 void   DbgInit(void);           /* 启动时取 exe 目录（供日志文件路径） */
 void   DbgLog(const WCHAR* fmt, ...); /* 开启时追加一行日志（仅检测线程调） */
-void   DbgShutdown(void);       /* 关闭日志文件 */
+void   DbgClose(void);          /* 释放日志文件句柄（日志关闭时调，仅检测线程） */
+void   DbgShutdown(void);       /* 退出时释放 */
 
 /* ---- ime.c ---- */
 int    ImeIsCapsLock(void);     /* Caps Lock 是否开启                */

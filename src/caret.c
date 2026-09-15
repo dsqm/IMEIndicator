@@ -122,20 +122,26 @@ static int ViaUiaSelection(CaretPos* out) {
     return ok;
 }
 
-/* 方法4：IME 组合窗口定位（候选框） */
+/* 方法4：IME 组合窗口定位（候选框）。**仅在存在组合串时信任**：
+   ImmGetCompositionWindow 在有组合（候选框有字）时返回光标附近的组合框位置，
+   无组合时却返回一个残留/远离的坐标——这正是"候选框空时点漂到远处"的根因。
+   无组合串（GCS_COMPSTR 返回 0）直接放弃该通道，让上层走 GUI/UIA 或隐藏。 */
 static int ViaIme(CaretPos* out) {
     HWND fg = GetForegroundWindow();
     if (!fg) return 0;
     HIMC hImc = ImmGetContext(fg);
     if (!hImc) return 0;
-    COMPOSITIONFORM cf;
-    ZeroMemory(&cf, sizeof(cf));
     int ok = 0;
-    if (ImmGetCompositionWindow(hImc, &cf) && (cf.dwStyle & CFS_POINT)) {
-        POINT pt = { cf.ptCurrentPos.x, cf.ptCurrentPos.y };
-        if (ClientToScreen(fg, &pt)) {
-            out->x = pt.x; out->y = pt.y; out->h = 20;
-            ok = 1;
+    int bytes = (int)ImmGetCompositionStringW(hImc, GCS_COMPSTR, NULL, 0);
+    if (bytes > 0) {
+        COMPOSITIONFORM cf;
+        ZeroMemory(&cf, sizeof(cf));
+        if (ImmGetCompositionWindow(hImc, &cf) && (cf.dwStyle & CFS_POINT)) {
+            POINT pt = { cf.ptCurrentPos.x, cf.ptCurrentPos.y };
+            if (ClientToScreen(fg, &pt)) {
+                out->x = pt.x; out->y = pt.y; out->h = 20;
+                ok = 1;
+            }
         }
     }
     ImmReleaseContext(fg, hImc);

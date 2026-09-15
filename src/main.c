@@ -211,6 +211,10 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
         Sleep(trackMs > 0 ? (DWORD)trackMs : 15);
         if (g_showDot < 0) break;   /* 退出信号 */
 
+        /* 日志开关下降沿：释放文件句柄（日志已关闭，文件不再被占用） */
+        if (!g_logging && wasLogging) DbgClose();
+        wasLogging = g_logging ? 1 : 0;
+
         /* 日志开关上升沿：先写一版环境头（DPI + 焦点），便于定位坐标空间 */
         if (g_logging && !wasLogging) {
             HDC hdc = GetDC(NULL);

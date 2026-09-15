@@ -68,3 +68,9 @@ void DbgLog(const WCHAR* fmt, ...) {
 void DbgShutdown(void) {
     DebugClose();
 }
+
+/* 托盘关闭日志时释放文件句柄（否则文件一直被占用，无法删除/改名）。
+   由检测线程在 g_logging 下降沿调用，保证文件只被一个线程碰。 */
+void DbgClose(void) {
+    DebugClose();
+}
