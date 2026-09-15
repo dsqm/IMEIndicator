@@ -107,6 +107,7 @@ void CfgLoad(ImeCfg* c) {
     DWORD en=DEF_EN_RGB, caps=DEF_CAPS_RGB, kbden=DEF_KBDEN_RGB;
     DWORD cn=0;   /* Cn 默认 0：中文态不显示圆点（通用 0 规则） */
     c->size=8; c->offsetX=2; c->offsetY=4; c->pollMs=100; c->trackMs=15;
+    c->imeStrategy=0;
 
     FILE* f=NULL;
     if (_wfopen_s(&f, path, L"rb")!=0 || !f) {
@@ -118,6 +119,9 @@ void CfgLoad(ImeCfg* c) {
             ";\n"
             "PollIntervalMs = 100    ; 状态(中英/大写/黑名单)检测间隔(ms)\n"
             "TrackIntervalMs = 15    ; 光标坐标追踪间隔(ms)\n"
+            "; 中英判定策略：0=自动学习(推荐) 1=只看 IME open 状态 2=只看转换模式\n"
+            "; 自动学习会观察切换时哪个信号在变；个别输入法识别不准时可手动指定。\n"
+            "ImeStrategy = 0\n"
             ";\n"
             "[Colors]\n"
             "; 颜色格式：#RRGGBB 或 #RRGGBBAA（AA=十六进制不透明度，留空用下面 Alpha）\n"
@@ -187,6 +191,7 @@ void CfgLoad(ImeCfg* c) {
                                     WideCharToMultiByte(CP_UTF8,0,v,-1,vb,(int)sizeof(vb),0,0);
                                     if (ISAME(kb,"pollintervalms"))   c->pollMs=ParseIntA(vb,100,5,60000);
                                     else if (ISAME(kb,"trackintervalms")) c->trackMs=ParseIntA(vb,15,5,200);
+                                    else if (ISAME(kb,"imestrategy")) c->imeStrategy=ParseIntA(vb,0,0,2);
                                 } else if (sec==1 && eq) {
                                     *eq=0;
                                     WCHAR k[CFG_NAME_MAX], v[128];

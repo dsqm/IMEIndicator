@@ -31,6 +31,7 @@ typedef struct {
     int          offsetY; /* 相对光标底缘的垂直偏移（+ 下）                       */
     int          pollMs;  /* 状态检测间隔                                        */
     int          trackMs; /* 光标追踪间隔                                        */
+    int          imeStrategy; /* 中英判定策略：0=自动学习 1=open状态 2=转换模式    */
 } ImeCfg;
 
 /* 状态判定结果 */
@@ -58,6 +59,21 @@ int    ImeIsCapsLock(void);     /* Caps Lock 是否开启                */
 int    ImeIsChineseMode(void);  /* 焦点 IME 是否处于中文组合状态        */
 int    ImeIsEnglishKeyboard(void); /* 前台键盘布局是否英文语言（主语言 0x09） */
 HWND   ImeFocusedWindow(void);  /* 前台线程的焦点窗口                */
+
+/* 一次中英探测拿到的原始信号与判定依据（日志诊断用）。
+   不同输入法暴露的开关不一样：有的只动 open 状态、有的只动转换模式、
+   有的 open 状态还不是 0/1 —— 所以要两个都取，再看哪个在变。 */
+typedef struct {
+    HWND  hwnd;      /* 本次参与探测的焦点窗口                     */
+    int   ok;        /* 1=向 IME 窗口取到了值                      */
+    int   opened;    /* IMC_GETOPENSTATUS 原始值（-1=没取到）      */
+    int   conv;      /* IMC_GETCONVERSIONMODE 原始值（-1=没取到）  */
+    int   strategy;  /* 0=复合兜底 1=open 状态 2=转换模式          */
+    int   nonBinary; /* 1=该输入法 open 状态不是 0/1               */
+} ImeProbe;
+
+int    ImeIsChineseModeEx(ImeProbe* p);  /* p 可为 NULL：同 ImeIsChineseMode */
+void   ImeSetForcedStrategy(int s);      /* 0=自动 1=open 状态 2=转换模式   */
 
 /* ---- caret.c ---- */
 /* 本次坐标由哪条通道提供（日志诊断漂移用） */

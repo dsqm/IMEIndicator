@@ -108,10 +108,31 @@ static void FgDesc(WCHAR* out, size_t cap) {
     _snwprintf_s(out, cap, _TRUNCATE, L"[%s] %s", cls, proc);
 }
 
+/* ---------- 单实例 ---------- */
+static HANDLE g_single = NULL;
+
+static int SingleInstanceAcquire(void) {
+    g_single = CreateMutexW(NULL, FALSE, L"IMEStatus_SingleInstance");
+    if (!g_single) return 1;                       /* 建不了就照常跑，别把程序卡死 */
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(g_single);
+        g_single = NULL;
+        return 0;                                  /* 已有一个实例在跑 */
+    }
+    return 1;
+}
+
+static void SingleInstanceRelease(void) {
+    if (g_single) { CloseHandle(g_single); g_single = NULL; }
+}
+
 static void RestartApp(void) {
     WCHAR exe[MAX_PATH];
-    if (GetModuleFileNameW(NULL, exe, MAX_PATH) > 0)
+    if (GetModuleFileNameW(NULL, exe, MAX_PATH) > 0) {
+        /* 先放互斥量再拉继任者：否则继任者抢先建锁、发现自己"已存在"直接退出 */
+        SingleInstanceRelease();
         ShellExecuteW(NULL, L"open", exe, NULL, NULL, SW_SHOWNORMAL);
+    }
     PostQuitMessage(0);
 }
 
@@ -214,30 +235,37 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
     /* 中英模式查询（跨进程 SendMessage）仅在其结果会影响显示时才做：
        En 与 Cn 至少一个非 0 才查；两个都是 0（都不显示）时跳过，避免卡顿。 */
     const int needMode = (g_cfg.enrgb != 0 || g_cfg.cnrgb != 0);
-    ULONGLONG lastPoll = 0;
+    ImeSetForcedStrategy(g_cfg.imeStrategy);
+    ULONGLONG lastPoll = 0, lastLog = 0;
     int shown = 0;
     ImeState cur = IMEST_EN;
     int wasLogging = 0;
     int wasBlocked = 0;
     WCHAR lastFg[256] = L"";
+    ImeProbe pr;                /* 保留最近一次探测结果：循环比探测快，
+                                   日志心跳不能拿"本轮没探测"当成查询失败 */
+    ZeroMemory(&pr, sizeof(pr));
+    pr.opened = -1;
+    pr.conv = -1;
 
     for (;;) {
         Sleep(trackMs > 0 ? (DWORD)trackMs : 15);
         if (g_showDot < 0) break;   /* 退出信号 */
 
-        /* 日志开关下降沿：释放文件句柄（日志已关闭，文件不再被占用） */
+        /* 日志开关边沿：上升沿先取（要在 wasLogging 被刷新之前算），
+           下降沿释放文件句柄（日志已关闭，文件不再被占用）。 */
+        int rising = (g_logging && !wasLogging);
         if (!g_logging && wasLogging) DbgClose();
         wasLogging = g_logging ? 1 : 0;
 
-        /* 日志开关上升沿：先写一版环境头（DPI + 焦点），便于定位坐标空间 */
-        if (g_logging && !wasLogging) {
+        /* 上升沿写一版环境头（DPI + 焦点窗口），便于定位坐标空间问题 */
+        if (rising) {
             HDC hdc = GetDC(NULL);
             int dpi = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 0;
             if (hdc) ReleaseDC(NULL, hdc);
             FgDesc(lastFg, 256);
             DbgLog(L"== logging on  screenDPI=%d fg:%s (process DPI-aware per-monitor)", dpi, lastFg);
         }
-        wasLogging = g_logging ? 1 : 0;
 
         /* [Ignore] 命中：跳过中英状态检测（中文组合查询会跨进程发消息，可能
            卡顿）。光标追踪照常，圆点保持上一次颜色。 */
@@ -249,13 +277,26 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
 
         /* 状态（按 pollMs 节流重算颜色）；命中黑名单时本段跳过 */
         ULONGLONG now = GetTickCount64();
+        int stateChanged = 0;
         if (!blocked && now - lastPoll >= (ULONGLONG)pollMs) {
             lastPoll = now;
-            if (ImeIsCapsLock())                       cur = IMEST_CAPS;
-            else if (ImeIsEnglishKeyboard())            cur = IMEST_KBD_EN;
-            else if (needMode && ImeIsChineseMode())   cur = IMEST_CN;
-            else                                       cur = IMEST_EN;
-            OverlaySetColor(StateColor(cur), g_cfg.dotAlpha);
+            ImeState prev = cur;
+            /* 大写在握 / 英文键盘这两条路不查 IME，pr 标记为"本次没探" */
+            if (ImeIsCapsLock())            { cur = IMEST_CAPS;   pr.ok = 0; pr.opened = -1; pr.conv = -1; }
+            else if (ImeIsEnglishKeyboard()) { cur = IMEST_KBD_EN; pr.ok = 0; pr.opened = -1; pr.conv = -1; }
+            else if (needMode) {
+                int cn = ImeIsChineseModeEx(&pr);
+                cur = cn ? IMEST_CN : IMEST_EN;
+            } else {
+                cur = IMEST_EN;
+                pr.ok = 0;
+                pr.opened = -1;
+                pr.conv = -1;
+            }
+            if (cur != prev) {
+                stateChanged = 1;
+                OverlaySetColor(StateColor(cur), g_cfg.dotAlpha);
+            }
         }
 
         /* 通用规则：当前状态色值为 0 -> 不显示圆点（如 Cn=0 时中文态隐藏） */
@@ -263,26 +304,38 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
 
         /* 光标追踪：找到就跟随，找不到就隐藏 */
         CaretPos cp;
-        if (want && CaretGetPos(&cp)) {
-            if (g_logging) {
-                WCHAR fg[256];
-                FgDesc(fg, 256);
-                if (wcscmp(fg, lastFg) != 0) {
-                    lstrcpynW(lastFg, fg, 256);
-                    RECT wr = {0,0,0,0};
-                    HWND hf = ImeFocusedWindow();
-                    if (hf) GetWindowRect(hf, &wr);
-                    DbgLog(L"FG -> %s  winRect=(%d,%d)-(%d,%d)",
-                           fg, wr.left, wr.top, wr.right, wr.bottom);
-                }
-                DbgLog(L"state=%s want=1 caret=(%d,%d,h=%d) src=%s fg:%s",
-                       StateName(cur), cp.x, cp.y, cp.h, SrcName(cp.source), fg);
+        ZeroMemory(&cp, sizeof(cp));
+        int got = (want && CaretGetPos(&cp));
+
+        /* 日志：状态变化 / 前台窗口变化 / 每 500ms 心跳各记一行。
+           不能只在"找到光标"时写 —— 光标一丢就整个日志空掉，查不到问题。 */
+        if (g_logging) {
+            WCHAR fg[256];
+            FgDesc(fg, 256);
+            int fgChanged = (wcscmp(fg, lastFg) != 0);
+            if (fgChanged) {
+                lstrcpynW(lastFg, fg, 256);
+                RECT wr = {0,0,0,0};
+                HWND hf = ImeFocusedWindow();
+                if (hf) GetWindowRect(hf, &wr);
+                DbgLog(L"FG -> %s  winRect=(%d,%d)-(%d,%d)",
+                       fg, wr.left, wr.top, wr.right, wr.bottom);
             }
+            if (stateChanged || fgChanged || now - lastLog >= 500) {
+                lastLog = now;
+                DbgLog(L"state=%s want=%d caret=%s(%d,%d,h=%d) src=%s | "
+                       L"opened=%d conv=0x%X ok=%d strat=%d nb=%d | %s",
+                       StateName(cur), want, got ? L"hit" : L"miss",
+                       cp.x, cp.y, cp.h, SrcName(cp.source),
+                       pr.opened, (DWORD)pr.conv, pr.ok, pr.strategy, pr.nonBinary,
+                       fg);
+            }
+        }
+
+        if (got) {
             if (!shown) { OverlaySetVisible(1); shown = 1; }
             OverlayMove(cp.x, cp.y + cp.h);
         } else {
-            if (g_logging && shown)
-                DbgLog(L"hide state=%s want=%d", StateName(cur), want);
             if (shown) { OverlaySetVisible(0); shown = 0; }
         }
     }
@@ -293,13 +346,20 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                    _In_ LPSTR lpCmd, _In_ int nShow) {
     (void)hInst; (void)hPrev; (void)lpCmd; (void)nShow;
 
+    if (!SingleInstanceAcquire()) return 0;   /* 已有一个实例在跑，直接退出 */
+
     SetDpiAwareness();          /* 必须最早 */
     DbgInit();
+
+    /* --log：启动即开日志，省得先去托盘点一下（排查"日志不生成"时用它） */
+    const WCHAR* cmdline = GetCommandLineW();
+    if (cmdline && wcsstr(cmdline, L"--log")) InterlockedExchange(&g_logging, 1);
 
     ZeroMemory(&g_cfg, sizeof(g_cfg));
     CfgLoad(&g_cfg);            /* 缺配置时在 exe 同目录生成模板 */
 
     OverlayInit(&g_cfg);        /* 创建悬浮圆点窗口（本线程，走同一消息循环） */
+    OverlaySetColor(StateColor(IMEST_EN), g_cfg.dotAlpha);  /* 首帧色（未变状态前用它） */
     TrayInstall();
 
     HANDLE th = CreateThread(NULL, 0, DetectorThread, NULL, 0, NULL);
@@ -316,5 +376,6 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     CloseHandle(th);
     TrayRemove();
     OverlayShutdown();
+    SingleInstanceRelease();
     return 0;
 }
