@@ -47,22 +47,24 @@ static HWND FindImeWindow(HWND focus) {
     return ime;
 }
 
-/* 向 IME 窗口问一次 open 状态与转换模式。任一项取到即 ok=1。 */
+/* 向 IME 窗口问一次 open 状态与转换模式。**两项都取到才算 ok**：
+   只取到一项时另一项仍是 -1，而 (-1 & IME_CMODE_NATIVE) 为真 → 会误判成中文，
+   还会把策略锁死在"看转换模式"上。宁可这次不算、沿用上次状态。 */
 static int ImeQuery(HWND focus, int* opened, int* conv) {
     *opened = -1; *conv = -1;
     HWND ime = FindImeWindow(focus);
     if (!ime) return 0;
-    int ok = 0;
+    int gotOpen = 0, gotConv = 0;
     DWORD_PTR v = 0;
     if (SendMessageTimeoutW(ime, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0,
                             SMTO_ABORTIFHUNG, IME_QUERY_TIMEOUT_MS, &v)) {
-        *opened = (int)v; ok = 1;
+        *opened = (int)v; gotOpen = 1;
     }
     if (SendMessageTimeoutW(ime, WM_IME_CONTROL, IMC_GETCONVERSIONMODE, 0,
                             SMTO_ABORTIFHUNG, IME_QUERY_TIMEOUT_MS, &v)) {
-        *conv = (int)v; ok = 1;
+        *conv = (int)v; gotConv = 1;
     }
-    return ok;
+    return (gotOpen && gotConv) ? 1 : 0;
 }
 
 /* ---------- 自适应判定 ----------
@@ -108,7 +110,9 @@ static void NonBinaryReset(void) {
 int ImeIsChineseModeEx(ImeProbe* p) {
     HWND focus = ImeFocusedWindow();
     int opened = -1, conv = -1;
-    int ok = ImeQuery(focus, &opened, &conv);
+    /* 没有前台窗口时**绝不能**去查 IME：FindImeWindow 会退到本线程的默认 IME
+       窗口，读回来的是"我自己"的输入法状态，不是前台应用的。 */
+    int ok = focus ? ImeQuery(focus, &opened, &conv) : 0;
     ULONGLONG now = GetTickCount64();
     int skip = 0;
 
@@ -217,12 +221,18 @@ int ImeIsChineseMode(void) {
     return ImeIsChineseModeEx(NULL);
 }
 
-/* 前台键盘布局是否英文语言：HKL 低 16 位是语言 ID，低字节是主语言
-   （0x09 = LANG_ENGLISH）。英文布局（0409/0809/0c09…）都算英文键盘。 */
-int ImeIsEnglishKeyboard(void) {
+/* 前台键盘布局的主语言 ID：HKL 低 16 位是语言 ID，低字节是主语言
+   （0x04 中文 / 0x09 英文 / 0x11 日文 / 0x12 韩文）。
+   没有前台窗口返回 -1 —— 调用方据此沿用上次状态，别当成英文。 */
+int ImeKeyboardLang(void) {
     HWND fg = GetForegroundWindow();
-    if (!fg) return 0;
+    if (!fg) return -1;
     DWORD tid = GetWindowThreadProcessId(fg, NULL);
     HKL hkl = GetKeyboardLayout(tid);
-    return (((DWORD)(UINT_PTR)hkl) & 0xFF) == 0x09;
+    return (int)(((DWORD)(UINT_PTR)hkl) & 0xFF);
+}
+
+/* 是否英文键盘布局：英文布局（0409/0809/0c09…）主语言都是 0x09 */
+int ImeIsEnglishKeyboard(void) {
+    return ImeKeyboardLang() == 0x09;
 }

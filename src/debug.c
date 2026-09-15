@@ -25,19 +25,27 @@ void DbgInit(void) {
     }
 }
 
+/* 单个日志文件上限：超了就换一个新文件（心跳 2 行/秒，开一整夜也不至于涨到几百 MB） */
+#define DBG_MAX_BYTES (4LL * 1024 * 1024)
+
 /* 打开本次会话的日志文件：<exe目录>\log\IMEStatus-<时间>.log。
-   目录不存在就建；文件用 "w"（新建），一次会话一个、不会跨启动追加。 */
+   目录不存在就建；文件用 "w"（新建），一次会话一个、不会跨启动追加。
+   log 子目录建不起来（例如装在只读目录）时退回 exe 同目录，别静默不写。 */
 static void DebugOpen(void) {
     if (!g_dir[0]) return;
     WCHAR dir[MAX_PATH];
     _snwprintf_s(dir, MAX_PATH, _TRUNCATE, L"%s\\log", g_dir);
-    CreateDirectoryW(dir, NULL);   /* 已存在则忽略 */
+    WCHAR base[MAX_PATH];
+    lstrcpynW(base, dir, MAX_PATH);
+    BOOL haveDir = CreateDirectoryW(dir, NULL);
+    if (!haveDir && GetLastError() != ERROR_ALREADY_EXISTS)
+        lstrcpynW(base, g_dir, MAX_PATH);
     SYSTEMTIME st;
     GetLocalTime(&st);
     WCHAR path[MAX_PATH];
     _snwprintf_s(path, MAX_PATH, _TRUNCATE,
                  L"%s\\IMEStatus-%04u%02u%02u-%02u%02u%02u.log",
-                 dir, st.wYear, st.wMonth, st.wDay,
+                 base, st.wYear, st.wMonth, st.wDay,
                  st.wHour, st.wMinute, st.wSecond);
     _wfopen_s(&g_fp, path, L"w, ccs=UTF-8");
 }
@@ -63,6 +71,8 @@ void DbgLog(const WCHAR* fmt, ...) {
     va_end(ap);
     fputwc(L'\n', g_fp);
     fflush(g_fp);
+    /* 到上限就换文件：关掉句柄，下次 DbgLog 会按新时间另开一个 */
+    if (_ftelli64(g_fp) > DBG_MAX_BYTES) DebugClose();
 }
 
 void DbgShutdown(void) {

@@ -18,13 +18,18 @@
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "imm32.lib")
 
-/* 颜色以 0x00RRGGBB 存放（不透明）；透明度在 overlay 里统一换算。
-   通用规则：色值为 0 表示该状态不显示圆点（En/Caps/KbdEn/Cn 一致）。 */
+/* 颜色以 0x00RRGGBB 存放（不透明）；透明度统一用 Alpha。
+   ★ "不显示该状态"用哨兵 IME_COLOR_NONE 表示，不能用 0 —— 0 是**黑色**，
+   否则想设成黑色就只能关掉该状态。 */
+#define IME_COLOR_NONE 0xFFFFFFFFu
+
 typedef struct {
-    DWORD        cnrgb;   /* 中文输入（默认 0=不显示；设颜色则中文态显示）      */
-    DWORD        enrgb;   /* 英文（默认橘色；0=不显示）                        */
-    DWORD        capsrgb; /* 大写键 Caps Lock（默认蓝色；0=不显示）            */
-    DWORD        kbdEnrgb;/* 英文键盘布局（默认紫色；0=不显示）               */
+    DWORD        cnrgb;   /* 中文输入（默认不显示；设颜色则中文态显示）        */
+    DWORD        enrgb;   /* 英文（默认红色）                                  */
+    DWORD        capsrgb; /* 大写键 Caps Lock（默认蓝色）                      */
+    DWORD        kbdEnrgb;/* 英文键盘布局（默认紫色）                          */
+    DWORD        jprgb;   /* 日文输入法（默认黑色）                            */
+    DWORD        krrgb;   /* 韩文输入法（默认黑色）                            */
     DWORD        dotAlpha;/* 0..255：圆点不透明度                                */
     int          size;    /* 圆点直径（像素）                                    */
     int          offsetX; /* 相对光标左缘的水平偏移（+ 右）                       */
@@ -40,11 +45,14 @@ typedef enum {
     IMEST_CAPS,        /* 大写键 Caps Lock                 */
     IMEST_KBD_EN,      /* 英文键盘布局                     */
     IMEST_CN,          /* 中文输入                          */
+    IMEST_JP,          /* 日文输入法（键盘布局主语言 0x11） */
+    IMEST_KR,          /* 韩文输入法（键盘布局主语言 0x12） */
     IMEST_COUNT
 } ImeState;
 
 /* ---- config.c ---- */
 void   CfgLoad(ImeCfg* c);      /* 读 IMEStatus.ini（缺则写模板） */
+void   CfgPath(WCHAR* out, size_t cap); /* 配置文件完整路径（托盘「打开配置」用） */
 int    CfgBlockedForeground(void); /* 前台程序进程名是否命中 [Ignore] */
 
 /* ---- debug.c ---- */
@@ -59,6 +67,7 @@ int    ImeIsCapsLock(void);     /* Caps Lock 是否开启                */
 int    ImeIsChineseMode(void);  /* 焦点 IME 是否处于中文组合状态        */
 int    ImeIsEnglishKeyboard(void); /* 前台键盘布局是否英文语言（主语言 0x09） */
 HWND   ImeFocusedWindow(void);  /* 前台线程的焦点窗口                */
+int    ImeKeyboardLang(void);   /* 前台键盘布局主语言 ID（0x04/0x09/0x11/0x12…）；无前台窗口返回 -1 */
 
 /* 一次中英探测拿到的原始信号与判定依据（日志诊断用）。
    不同输入法暴露的开关不一样：有的只动 open 状态、有的只动转换模式、

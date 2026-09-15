@@ -22,7 +22,8 @@ if not defined VS goto no_vs
 set "MSVCDIR="
 pushd "%VS%\VC\Tools\MSVC"
 if errorlevel 1 goto no_msvc
-for /d %%d in (*) do set "MSVCDIR=%%d"
+rem 版本号最大的目录：dir /o-n 倒序，取第一条（装了多个工具集时别挑到最后那个）
+for /f "delims=" %%d in ('dir /b /ad /o-n') do if not defined MSVCDIR set "MSVCDIR=%%d"
 popd
 if not defined MSVCDIR goto no_msvc
 set "MSVC=%VS%\VC\Tools\MSVC\%MSVCDIR%"
@@ -31,7 +32,7 @@ set "SDK=%PFX86%\Windows Kits\10"
 set "SDKVER="
 pushd "%SDK%\Include"
 if errorlevel 1 goto no_sdk
-for /d %%d in (*) do set "SDKVER=%%d"
+for /f "delims=" %%d in ('dir /b /ad /o-n') do if not defined SDKVER set "SDKVER=%%d"
 popd
 if not defined SDKVER goto no_sdk
 

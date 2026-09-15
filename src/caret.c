@@ -33,9 +33,9 @@ static int UiRect(CaretPos* out, IUIAutomationTextRange* range) {
     SafeArrayGetUBound(arr, 1, &ub);
     long n = ub - lb + 1;
     int ok = 0;
-    if (n >= 4) {
+    if (n >= 4 && (n % 4) == 0) {   /* 每矩形 4 个元素，长度不是 4 的倍数即数据异常 */
         double* d = NULL;
-        if (SUCCEEDED(SafeArrayAccessData(arr, (void**)&d))) {
+        if (SUCCEEDED(SafeArrayAccessData(arr, (void**)&d)) && d) {
             out->x = (int)d[0];
             out->y = (int)d[1];
             out->h = (int)d[3];
@@ -88,7 +88,7 @@ static int ViaMsaa(CaretPos* out) {
     acc->Release();
     if (FAILED(hr)) return 0;
     out->x = (int)x; out->y = (int)y; out->h = (int)h;
-    return CaretPlausible(out) ? 1 : 0;
+    return 1;   /* 合理性由 CaretGetPos 的 TRY_CHANNEL 统一过滤（这样 reject 日志才打得出） */
 }
 
 /* 自 GetFocusedElement 向上（NVDA 式）找最近一个实现了指定文本模式的元素：

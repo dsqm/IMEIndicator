@@ -19,6 +19,8 @@ volatile LONG g_showDot = 0;
 static HWND g_trayWnd = NULL;
 static HICON g_icon = NULL;
 
+#define IDM_OPENCFG 1004
+
 /* ---------- DPI 感知：必须在建任何窗口之前 ---------- */
 static void SetDpiAwareness(void) {
     HMODULE u = GetModuleHandleW(L"user32.dll");
@@ -37,21 +39,36 @@ static void SetDpiAwareness(void) {
     if (p3) p3();
 }
 
-/* ---------- 托盘图标：画一个当前英文色的实心圆 ---------- */
-static HICON MakeTrayIcon(DWORD rgb) {
-    int sz = 32;
+/* ---------- 托盘图标：字母 I ---------- */
+static void FillRect32(BYTE* buf, int sz, int x0, int y0, int x1, int y1,
+                       BYTE cr, BYTE cg, BYTE cb, BYTE ca) {
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;
+    if (x1 > sz) x1 = sz; if (y1 > sz) y1 = sz;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            BYTE* p = buf + (y * sz + x) * 4;
+            p[0] = cb; p[1] = cg; p[2] = cr; p[3] = ca;
+        }
+}
+
+/* 衬线体 "I"：上横 + 竖 + 下横。先描一圈深色、再填白 —— 深浅任务栏都看得清。 */
+static HICON MakeTrayIcon(void) {
+    const int sz = 32;
     BYTE* buf = (BYTE*)calloc((size_t)sz * sz, 4);
     if (!buf) return NULL;
-    double cx = (sz - 1) / 2.0, cy = (sz - 1) / 2.0, r = sz / 2.0 - 1.0;
-    BYTE cr = (BYTE)(rgb >> 16), cg = (BYTE)(rgb >> 8), cb = (BYTE)rgb;
-    for (int y = 0; y < sz; y++)
-        for (int x = 0; x < sz; x++) {
-            double dx = x - cx + 0.5, dy = y - cy + 0.5;
-            if (dx * dx + dy * dy <= r * r) {
-                BYTE* p = buf + (y * sz + x) * 4;
-                p[0] = cb; p[1] = cg; p[2] = cr; p[3] = 255;
-            }
-        }
+    const int barX0 = 7, barX1 = 25;   /* 上下横：宽 18 */
+    const int stemX0 = 13, stemX1 = 19;/* 竖：宽 6 */
+    const int topY0 = 6, topY1 = 11;
+    const int botY0 = 21, botY1 = 26;
+    /* 深色描边（各向外扩 1px） */
+    FillRect32(buf, sz, barX0 - 1, topY0 - 1, barX1 + 1, topY1 + 1, 0x1A, 0x1A, 0x1A, 255);
+    FillRect32(buf, sz, barX0 - 1, botY0 - 1, barX1 + 1, botY1 + 1, 0x1A, 0x1A, 0x1A, 255);
+    FillRect32(buf, sz, stemX0 - 1, topY0 - 1, stemX1 + 1, botY1 + 1, 0x1A, 0x1A, 0x1A, 255);
+    /* 白色本体 */
+    FillRect32(buf, sz, barX0, topY0, barX1, topY1, 0xFF, 0xFF, 0xFF, 255);
+    FillRect32(buf, sz, barX0, botY0, barX1, botY1, 0xFF, 0xFF, 0xFF, 255);
+    FillRect32(buf, sz, stemX0, topY0, stemX1, botY1, 0xFF, 0xFF, 0xFF, 255);
+
     HBITMAP hbm = CreateBitmap(sz, sz, 1, 32, buf);
     free(buf);
     if (!hbm) return NULL;
@@ -71,6 +88,7 @@ static HICON MakeTrayIcon(DWORD rgb) {
 static void ShowTrayMenu(void) {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, IDM_LOG, L"记录日志");
+    AppendMenuW(m, MF_STRING, IDM_OPENCFG, L"打开配置");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_RESTART, L"重启");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -81,7 +99,16 @@ static void ShowTrayMenu(void) {
     SetForegroundWindow(g_trayWnd);
     TrackPopupMenu(m, TPM_LEFTALIGN | TPM_BOTTOMALIGN,
                    pt.x, pt.y, 0, g_trayWnd, NULL);
+    /* 宿主窗口不可见 → 菜单不会在点到外面时自动收起；补一条 WM_NULL 唤醒消息循环 */
+    PostMessageW(g_trayWnd, WM_NULL, 0, 0);
     DestroyMenu(m);
+}
+
+/* 用记事本打开配置文件（改完点托盘「重启」生效） */
+static void OpenConfig(void) {
+    WCHAR path[MAX_PATH];
+    CfgPath(path, MAX_PATH);
+    ShellExecuteW(NULL, L"open", L"notepad.exe", path, NULL, SW_SHOWNORMAL);
 }
 
 /* 前台焦点窗口的描述串："[窗口类] 进程名"  —— 诊断哪个程序漂移用 */
@@ -142,6 +169,7 @@ static LRESULT CALLBACK TrayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     } else if (m == WM_COMMAND) {
         switch (LOWORD(w)) {
         case IDM_RESTART: RestartApp(); return 0;
+        case IDM_OPENCFG: OpenConfig();  return 0;
         case IDM_EXIT:    PostQuitMessage(0); return 0;
         case IDM_LOG:
             InterlockedExchange(&g_logging, g_logging ? 0 : 1);
@@ -171,7 +199,7 @@ static void TrayInstall(void) {
                                 NULL, NULL, hi, NULL);
     if (!g_trayWnd) return;
 
-    g_icon = MakeTrayIcon(g_cfg.enrgb);
+    g_icon = MakeTrayIcon();
 
     NOTIFYICONDATAW nid;
     ZeroMemory(&nid, sizeof(nid));
@@ -214,16 +242,20 @@ static const WCHAR* StateName(ImeState s) {
     case IMEST_CAPS:   return L"CAPS";
     case IMEST_KBD_EN: return L"KBD_EN";
     case IMEST_CN:     return L"CN";
+    case IMEST_JP:     return L"JP";
+    case IMEST_KR:     return L"KR";
     case IMEST_EN:     return L"EN";
     default:           return L"?";
     }
 }
-/* 各状态对应的圆点颜色；通用规则：0 = 该状态不显示圆点 */
+/* 各状态对应的圆点颜色；IME_COLOR_NONE = 该状态不显示圆点 */
 static DWORD StateColor(ImeState s) {
     switch (s) {
     case IMEST_CAPS:   return g_cfg.capsrgb;
     case IMEST_KBD_EN: return g_cfg.kbdEnrgb;
     case IMEST_CN:     return g_cfg.cnrgb;
+    case IMEST_JP:     return g_cfg.jprgb;
+    case IMEST_KR:     return g_cfg.krrgb;
     default:           return g_cfg.enrgb;
     }
 }
@@ -234,7 +266,7 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
     int pollMs = g_cfg.pollMs, trackMs = g_cfg.trackMs;
     /* 中英模式查询（跨进程 SendMessage）仅在其结果会影响显示时才做：
        En 与 Cn 至少一个非 0 才查；两个都是 0（都不显示）时跳过，避免卡顿。 */
-    const int needMode = (g_cfg.enrgb != 0 || g_cfg.cnrgb != 0);
+    const int needMode = (g_cfg.enrgb != IME_COLOR_NONE || g_cfg.cnrgb != IME_COLOR_NONE);
     ImeSetForcedStrategy(g_cfg.imeStrategy);
     ULONGLONG lastPoll = 0, lastLog = 0;
     int shown = 0;
@@ -281,9 +313,13 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
         if (!blocked && now - lastPoll >= (ULONGLONG)pollMs) {
             lastPoll = now;
             ImeState prev = cur;
-            /* 大写在握 / 英文键盘这两条路不查 IME，pr 标记为"本次没探" */
-            if (ImeIsCapsLock())            { cur = IMEST_CAPS;   pr.ok = 0; pr.opened = -1; pr.conv = -1; }
-            else if (ImeIsEnglishKeyboard()) { cur = IMEST_KBD_EN; pr.ok = 0; pr.opened = -1; pr.conv = -1; }
+            int lang = ImeKeyboardLang();
+            /* 大写 / 英文键盘 / 日 / 韩 这四条路不查 IME，pr 标记为"本次没探" */
+            if (ImeIsCapsLock()) { cur = IMEST_CAPS; pr.ok = 0; pr.opened = -1; pr.conv = -1; }
+            else if (lang < 0)   { /* 没有前台窗口：沿用上次状态，别去查（会读到自己） */ }
+            else if (lang == 0x09) { cur = IMEST_KBD_EN; pr.ok = 0; pr.opened = -1; pr.conv = -1; }
+            else if (lang == 0x11) { cur = IMEST_JP;     pr.ok = 0; pr.opened = -1; pr.conv = -1; }
+            else if (lang == 0x12) { cur = IMEST_KR;     pr.ok = 0; pr.opened = -1; pr.conv = -1; }
             else if (needMode) {
                 int cn = ImeIsChineseModeEx(&pr);
                 cur = cn ? IMEST_CN : IMEST_EN;
@@ -299,8 +335,8 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             }
         }
 
-        /* 通用规则：当前状态色值为 0 -> 不显示圆点（如 Cn=0 时中文态隐藏） */
-        int want = (StateColor(cur) != 0);
+        /* 通用规则：当前状态色为 IME_COLOR_NONE -> 不显示圆点（如 Cn=0 时中文态隐藏） */
+        int want = (StateColor(cur) != IME_COLOR_NONE);
 
         /* 光标追踪：找到就跟随，找不到就隐藏 */
         CaretPos cp;

@@ -35,60 +35,52 @@ static void StripExeW(WCHAR* s) {
 
 static int ParseIntA(const char* v, int def, int lo, int hi) {
     if (!v||!v[0]) return def;
+    const char* p=v;
+    int neg=0;
+    if (*p=='-') { neg=1; p++; }
+    else if (*p=='+') p++;
     long long n=0; int any=0;
-    for (const char* p=v; *p; p++) {
+    for (; *p; p++) {
         if (*p<'0'||*p>'9') break;
         n=n*10+(*p-'0'); any=1;
         if (n>100000000LL) return def;
     }
     if (!any) return def;
+    if (neg) n=-n;
     if (n<lo) n=lo; if (n>hi) n=hi;
     return (int)n;
 }
 
-/* #RRGGBB 或 #RRGGBBAA -> 0x00RRGGBB + 返回 alpha(0..255) via *aout。
-   解析失败返回默认 rgb，alpha 用默认 alpha。 */
+/* 只认 #RRGGBB：透明度一律走 Alpha，颜色值不携带 AA。 */
 static int HexV(char c) {
     if (c>='0'&&c<='9') return c-'0';
     if (c>='a'&&c<='f') return c-'a'+10;
     if (c>='A'&&c<='F') return c-'A'+10;
     return 0;
 }
-static DWORD ParseColorA(const char* v, DWORD defRgb, DWORD defAlpha, DWORD* aout) {
-    DWORD rgb=defRgb, alpha=defAlpha;
-    if (v) {
-        const char* p=v;
-        while (*p==' '||*p=='\t') p++;
-        if (*p=='#') p++;
-        int len=0; while (p[len]>='0'&&p[len]<='9'||(p[len]>='A'&&p[len]<='F')||(p[len]>='a'&&p[len]<='f')) len++;
-        if (len>=6) {
-            rgb = ((DWORD)HexV(p[0])<<20)|((DWORD)HexV(p[1])<<16)|
-                  ((DWORD)HexV(p[2])<<12)|((DWORD)HexV(p[3])<<8)|
-                  ((DWORD)HexV(p[4])<<4)|((DWORD)HexV(p[5]));
-            if (len>=8) alpha = (DWORD)(HexV(p[6])<<4)|(DWORD)HexV(p[7]);
-        }
-    }
-    if (aout) *aout=alpha;
-    return rgb;
-}
-
-/* 通用规则：色值写 0（可带行内注释）表示该状态不显示圆点；
-   其余按 #RRGGBB 解析，解析失败回退默认。 */
-static DWORD ParseColor0(const char* v, DWORD defRgb, DWORD defAlpha, DWORD* aout) {
-    if (v) {
-        while (*v==' '||*v=='\t') v++;
-        if (v[0]=='0' && (v[1]==0 || v[1]==' ' || v[1]=='\t' || v[1]==';')) {
-            if (aout) *aout=defAlpha;
-            return 0;
-        }
-    }
-    return ParseColorA(v, defRgb, defAlpha, aout);
+/* 通用规则：色值写 0（可带行内注释）= 该状态不显示圆点。
+   ★ 用 IME_COLOR_NONE 哨兵而不是 0 —— 0 是**黑色**，两者不能混。 */
+static DWORD ParseColor6(const char* v, DWORD defRgb) {
+    if (!v) return defRgb;
+    while (*v==' '||*v=='\t') v++;
+    if (v[0]=='0' && (v[1]==0 || v[1]==' ' || v[1]=='\t' || v[1]==';'))
+        return IME_COLOR_NONE;
+    if (*v!='#') return defRgb;
+    v++;
+    int len=0;
+    while (v[len]>='0'&&v[len]<='9'||(v[len]>='A'&&v[len]<='F')||(v[len]>='a'&&v[len]<='f')) len++;
+    if (len<6) return defRgb;
+    return ((DWORD)HexV(v[0])<<20)|((DWORD)HexV(v[1])<<16)|
+           ((DWORD)HexV(v[2])<<12)|((DWORD)HexV(v[3])<<8)|
+           ((DWORD)HexV(v[4])<<4)|(DWORD)HexV(v[5]);
 }
 
 /* ---------- 默认值 ---------- */
-#define DEF_EN_RGB  0xFF8C00   /* 橘                                     */
+#define DEF_EN_RGB   0xFF0000  /* 红                                     */
 #define DEF_CAPS_RGB 0x0080FF  /* 蓝                                     */
 #define DEF_KBDEN_RGB 0x8B00FF /* 紫                                     */
+#define DEF_JP_RGB   0x000000  /* 黑                                     */
+#define DEF_KR_RGB   0x000000  /* 黑                                     */
 #define DEF_ALPHA   255
 
 static void SrcOfPath(WCHAR* out, size_t cap) {
@@ -101,12 +93,16 @@ static void SrcOfPath(WCHAR* out, size_t cap) {
 
 #define ISAME(s,w) (_stricmp(s,w)==0)
 
+/* 配置文件完整路径（托盘「打开配置」用） */
+void CfgPath(WCHAR* out, size_t cap) { SrcOfPath(out, cap); }
+
 void CfgLoad(ImeCfg* c) {
     WCHAR path[MAX_PATH]; SrcOfPath(path, MAX_PATH);
     int defAl=DEF_ALPHA;
     DWORD en=DEF_EN_RGB, caps=DEF_CAPS_RGB, kbden=DEF_KBDEN_RGB;
-    DWORD cn=0;   /* Cn 默认 0：中文态不显示圆点（通用 0 规则） */
-    c->size=8; c->offsetX=2; c->offsetY=4; c->pollMs=100; c->trackMs=15;
+    DWORD jp=DEF_JP_RGB, kr=DEF_KR_RGB;
+    DWORD cn=IME_COLOR_NONE;   /* Cn 默认不显示：中文态无圆点 */
+    c->size=9; c->offsetX=2; c->offsetY=4; c->pollMs=100; c->trackMs=15;
     c->imeStrategy=0;
 
     FILE* f=NULL;
@@ -124,16 +120,18 @@ void CfgLoad(ImeCfg* c) {
             "ImeStrategy = 0\n"
             ";\n"
             "[Colors]\n"
-            "; 颜色格式：#RRGGBB 或 #RRGGBBAA（AA=十六进制不透明度，留空用下面 Alpha）\n"
-            "; 通用规则：色值写 0 表示该状态不显示圆点\n"
-            "En   = #FF8C00   ; 英文（默认橘色）\n"
+            "; 颜色格式固定 #RRGGBB（6 位十六进制，必须带 #）；透明度一律用下面的 Alpha\n"
+            "; 通用规则：色值写 0 表示该状态不显示圆点（0 不等于黑色，黑色写 #000000）\n"
+            "En   = #FF0000   ; 英文（默认红色）\n"
             "Caps = #0080FF   ; 大写键 Caps Lock（默认蓝色）\n"
             "KbdEn= #8B00FF   ; 英文键盘布局（默认紫色）\n"
+            "Jp   = #000000   ; 日文输入法（默认黑色）\n"
+            "Kr   = #000000   ; 韩文输入法（默认黑色）\n"
             "Cn   = 0         ; 中文输入（0=不显示；设颜色值则中文态显示该色）\n"
             "Alpha= 255       ; 圆点全局不透明度 0..255（0=全透）\n"
             ";\n"
             "[Overlay]\n"
-            "Size    = 8      ; 圆点直径（像素）\n"
+            "Size    = 9      ; 圆点直径（像素）\n"
             "OffsetX = 2      ; 相对光标左缘的水平偏移（+ 右）\n"
             "OffsetY = 4      ; 相对光标底缘的垂直偏移（+ 下）\n"
             ";\n"
@@ -201,11 +199,12 @@ void CfgLoad(ImeCfg* c) {
                                     char kb[CFG_NAME_MAX*4], vb[512];
                                     WideCharToMultiByte(CP_UTF8,0,k,-1,kb,(int)sizeof(kb),0,0);
                                     WideCharToMultiByte(CP_UTF8,0,v,-1,vb,(int)sizeof(vb),0,0);
-                                    DWORD al=defAl;
-                                    if (ISAME(kb,"en"))   en  =ParseColor0(vb,en,defAl,&al);
-                                    else if (ISAME(kb,"caps")) caps=ParseColor0(vb,caps,defAl,&al);
-                                    else if (ISAME(kb,"kbden"))kbden=ParseColor0(vb,kbden,defAl,&al);
-                                    else if (ISAME(kb,"cn"))  cn  =ParseColor0(vb,cn,defAl,&al);
+                                    if (ISAME(kb,"en"))    en   =ParseColor6(vb,en);
+                                    else if (ISAME(kb,"caps"))  caps =ParseColor6(vb,caps);
+                                    else if (ISAME(kb,"kbden")) kbden=ParseColor6(vb,kbden);
+                                    else if (ISAME(kb,"cn"))    cn   =ParseColor6(vb,cn);
+                                    else if (ISAME(kb,"jp"))    jp   =ParseColor6(vb,jp);
+                                    else if (ISAME(kb,"kr"))    kr   =ParseColor6(vb,kr);
                                     else if (ISAME(kb,"alpha")) defAl=ParseIntA(vb,255,0,255);
                                 } else if (sec==2 && eq) {
                                     *eq=0;
@@ -239,6 +238,7 @@ void CfgLoad(ImeCfg* c) {
         fclose(f);
     }
     c->enrgb=en; c->capsrgb=caps; c->kbdEnrgb=kbden; c->cnrgb=cn;
+    c->jprgb=jp; c->krrgb=kr;
     c->dotAlpha=defAl;
 }
 

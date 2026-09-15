@@ -3,12 +3,26 @@
 /* ================= 悬浮圆点窗口 =================
    WS_EX_LAYERED + WS_EX_TRANSPARENT + WS_EX_TOPMOST + WS_EX_NOACTIVATE：
    不抢焦点、不拦鼠标、始终最顶。用 32 位 DIB Section + UpdateLayeredWindow
-   （ULW_ALPHA）画一个抗锯齿实心圆，alpha 为预乘，无 GDI+ 依赖。 */
+   （ULW_ALPHA）画一个抗锯齿实心圆，alpha 为预乘，无 GDI+ 依赖。
+
+   追踪间隔只有 15ms，所以：
+   - DIB/内存 DC 按尺寸缓存，不再每帧 Create/Delete；
+   - 位置与配色都没变时直接跳过重绘（只在真正变化时才 UpdateLayeredWindow）。 */
 
 static HWND    g_hwnd = NULL;
-static int     g_dotSize = 8, g_offX = 2, g_offY = 4;
-static BYTE    g_cr = 0xFF, g_cg = 0x8C, g_cb = 0x00; /* 当前颜色分量 */
-static BYTE    g_alpha = 190;
+static int     g_dotSize = 9, g_offX = 2, g_offY = 4;
+static BYTE    g_cr = 0xFF, g_cg = 0x00, g_cb = 0x00; /* 当前颜色分量（默认英文红） */
+static BYTE    g_alpha = 255;
+
+static HDC     g_mem = NULL;
+static HBITMAP g_bmp = NULL;
+static HGDIOBJ g_oldBmp = NULL;
+static void*   g_bits = NULL;
+static int     g_bmpSize = 0;
+static int     g_bmpDirty = 1;   /* 配色/尺寸变了 -> 重算像素 */
+static int     g_needPaint = 1;  /* 必须再 UpdateLayeredWindow 一次（如重新显示） */
+static int     g_lastX = 0, g_lastY = 0;
+static int     g_havePos = 0;
 
 static LRESULT CALLBACK OverlayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_DESTROY) return 0;
@@ -41,29 +55,45 @@ void OverlayInit(ImeCfg* c) {
     }
 }
 
+/* 释放位图与内存 DC */
+static void FreeSurface(void) {
+    if (g_mem && g_oldBmp) SelectObject(g_mem, g_oldBmp);
+    g_oldBmp = NULL;
+    if (g_mem) { DeleteDC(g_mem); g_mem = NULL; }
+    if (g_bmp) { DeleteObject(g_bmp); g_bmp = NULL; }
+    g_bits = NULL;
+    g_bmpSize = 0;
+    g_bmpDirty = 1;
+}
+
 void OverlayShutdown(void) {
     if (g_hwnd) { DestroyWindow(g_hwnd); g_hwnd = NULL; }
+    FreeSurface();
 }
 
 void OverlaySetVisible(int visible) {
-    if (g_hwnd) ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if (!g_hwnd) return;
+    ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+    g_needPaint = 1;             /* 重新显示后要再贴一次内容 */
 }
 
 void OverlaySetColor(DWORD rgb, DWORD alpha) {
-    g_cr = (BYTE)(rgb >> 16);
-    g_cg = (BYTE)(rgb >> 8);
-    g_cb = (BYTE)(rgb);
-    g_alpha = (BYTE)(alpha & 0xFF);
+    BYTE nr = (BYTE)(rgb >> 16), ng = (BYTE)(rgb >> 8), nb = (BYTE)rgb;
+    BYTE na = (BYTE)(alpha & 0xFF);
+    if (nr != g_cr || ng != g_cg || nb != g_cb || na != g_alpha) g_bmpDirty = 1;
+    g_cr = nr; g_cg = ng; g_cb = nb;
+    g_alpha = na;
 }
 
-/* 画 antialias 圆并放置窗口。
-   sx, baselineY：光标左上角屏幕坐标与光标底缘；窗口落在
-   (sx+offsetX, baselineY+offsetY)，圆居中于窗口。 */
-static void Redraw(int sx, int sy) {
+/* 按当前尺寸准备好 DIB Section（尺寸变了才重建） */
+static int EnsureSurface(void) {
+    if (g_mem && g_bmp && g_bits && g_bmpSize == g_dotSize) return 1;
+    FreeSurface();
     int sz = g_dotSize;
+    if (sz < 1) sz = 1;
     HDC scr = GetDC(NULL);
-    HDC mem = CreateCompatibleDC(scr);
-
+    if (!scr) return 0;
+    g_mem = CreateCompatibleDC(scr);
     BITMAPINFO bmi;
     ZeroMemory(&bmi, sizeof(bmi));
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
@@ -72,60 +102,73 @@ static void Redraw(int sx, int sy) {
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
-
-    void* bits = NULL;
-    HBITMAP hbm = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (hbm && bits) {
-        HGDIOBJ old = SelectObject(mem, hbm);
-
-        /* 预乘：UpdateLayeredWindow + AC_SRC_ALPHA 需要预乘 alpha */
-        int pr = (g_cr * g_alpha + 127) / 255;
-        int pg = (g_cg * g_alpha + 127) / 255;
-        int pb = (g_cb * g_alpha + 127) / 255;
-
-        double cx = (sz - 1) / 2.0, cy = (sz - 1) / 2.0;
-        double r = (sz / 2.0) - 0.5;         /* 圆心到边的内切半径，留 1px 抗锯齿 */
-        const int SS = 4;                     /* 4x4 子采样抗锯齿 */
-        BYTE* p = (BYTE*)bits;
-        for (int y = 0; y < sz; y++) {
-            for (int x = 0; x < sz; x++) {
-                /* 计算该像素的覆盖率（子采样点圆心距） */
-                int inside = 0;
-                for (int syy = 0; syy < SS; syy++)
-                    for (int sxx = 0; sxx < SS; sxx++) {
-                        double fx = x + (sxx + 0.5) / SS - cx;
-                        double fy = y + (syy + 0.5) / SS - cy;
-                        if (fx * fx + fy * fy <= r * r) inside++;
-                    }
-                int a = (g_alpha * inside + (SS * SS - 1)) / (SS * SS);
-                p[0] = (BYTE)((pb * a + 127) / 255);   /* B 预乘 */
-                p[1] = (BYTE)((pg * a + 127) / 255);
-                p[2] = (BYTE)((pr * a + 127) / 255);
-                p[3] = (BYTE)a;
-                p += 4;
-            }
-        }
-
-        POINT dst = { sx + g_offX, sy + g_offY };
-        POINT src = { 0, 0 };
-        SIZE   szw = { sz, sz };
-        BLENDFUNCTION bf;
-        bf.BlendOp = AC_SRC_OVER;
-        bf.BlendFlags = 0;
-        bf.SourceConstantAlpha = 255;
-        bf.AlphaFormat = AC_SRC_ALPHA;
-        UpdateLayeredWindow(g_hwnd, scr, &dst, &szw, mem, &src, 0, &bf, ULW_ALPHA);
-        SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-
-        SelectObject(mem, old);
-        DeleteObject(hbm);
-    }
-    DeleteDC(mem);
+    if (g_mem)
+        g_bmp = CreateDIBSection(g_mem, &bmi, DIB_RGB_COLORS, &g_bits, NULL, 0);
     ReleaseDC(NULL, scr);
+    if (!g_mem || !g_bmp || !g_bits) { FreeSurface(); return 0; }
+    g_oldBmp = SelectObject(g_mem, g_bmp);
+    g_bmpSize = sz;
+    g_bmpDirty = 1;
+    return 1;
 }
 
+/* 4x4 子采样抗锯齿画圆，写进缓存的 DIB */
+static void PaintDot(void) {
+    int sz = g_bmpSize;
+    /* 预乘：UpdateLayeredWindow + AC_SRC_ALPHA 需要预乘 alpha */
+    int pr = (g_cr * g_alpha + 127) / 255;
+    int pg = (g_cg * g_alpha + 127) / 255;
+    int pb = (g_cb * g_alpha + 127) / 255;
+
+    double cx = (sz - 1) / 2.0, cy = (sz - 1) / 2.0;
+    double r = (sz / 2.0) - 0.5;         /* 圆心到边的内切半径，留 1px 抗锯齿 */
+    const int SS = 4;                     /* 4x4 子采样抗锯齿 */
+    BYTE* p = (BYTE*)g_bits;
+    for (int y = 0; y < sz; y++) {
+        for (int x = 0; x < sz; x++) {
+            int inside = 0;
+            for (int syy = 0; syy < SS; syy++)
+                for (int sxx = 0; sxx < SS; sxx++) {
+                    double fx = x + (sxx + 0.5) / SS - cx;
+                    double fy = y + (syy + 0.5) / SS - cy;
+                    if (fx * fx + fy * fy <= r * r) inside++;
+                }
+            int a = (g_alpha * inside + (SS * SS - 1)) / (SS * SS);
+            p[0] = (BYTE)((pb * a + 127) / 255);   /* B 预乘 */
+            p[1] = (BYTE)((pg * a + 127) / 255);
+            p[2] = (BYTE)((pr * a + 127) / 255);
+            p[3] = (BYTE)a;
+            p += 4;
+        }
+    }
+    g_bmpDirty = 0;
+}
+
+/* sx, baselineY：光标左上角屏幕坐标与光标底缘；窗口落在
+   (sx+offsetX, baselineY+offsetY)，圆居中于窗口。 */
 void OverlayMove(int screenX, int baselineY) {
     if (!g_hwnd) return;
-    Redraw(screenX, baselineY);
+    /* 位置、配色都没变 -> 不重绘（追踪循环每 15ms 调一次，绝大多数是空转） */
+    if (!g_bmpDirty && !g_needPaint && g_havePos &&
+        screenX == g_lastX && baselineY == g_lastY) return;
+    if (!EnsureSurface()) return;
+    if (g_bmpDirty) PaintDot();
+
+    HDC scr = GetDC(NULL);
+    if (!scr) return;
+    POINT dst = { screenX + g_offX, baselineY + g_offY };
+    POINT src = { 0, 0 };
+    SIZE  szw = { g_bmpSize, g_bmpSize };
+    BLENDFUNCTION bf;
+    bf.BlendOp = AC_SRC_OVER;
+    bf.BlendFlags = 0;
+    bf.SourceConstantAlpha = 255;
+    bf.AlphaFormat = AC_SRC_ALPHA;
+    UpdateLayeredWindow(g_hwnd, scr, &dst, &szw, g_mem, &src, 0, &bf, ULW_ALPHA);
+    SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    ReleaseDC(NULL, scr);
+
+    g_lastX = screenX; g_lastY = baselineY; g_havePos = 1;
+    g_needPaint = 0;
 }
