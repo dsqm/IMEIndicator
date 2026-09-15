@@ -181,6 +181,7 @@ static void TrayRemove(void) {
 static const WCHAR* SrcName(CaretSource s) {
     switch (s) {
     case CARET_GUIINFO:   return L"guiinfo";
+    case CARET_MSAA:       return L"msaa";
     case CARET_UIA_CARET: return L"uia_caret";
     case CARET_UIA_SEL:   return L"uia_sel";
     case CARET_IME:       return L"ime";
@@ -191,9 +192,18 @@ static const WCHAR* StateName(ImeState s) {
     switch (s) {
     case IMEST_CAPS:   return L"CAPS";
     case IMEST_KBD_EN: return L"KBD_EN";
-    case IMEST_HIDDEN: return L"HIDDEN";
+    case IMEST_CN:     return L"CN";
     case IMEST_EN:     return L"EN";
     default:           return L"?";
+    }
+}
+/* 各状态对应的圆点颜色；通用规则：0 = 该状态不显示圆点 */
+static DWORD StateColor(ImeState s) {
+    switch (s) {
+    case IMEST_CAPS:   return g_cfg.capsrgb;
+    case IMEST_KBD_EN: return g_cfg.kbdEnrgb;
+    case IMEST_CN:     return g_cfg.cnrgb;
+    default:           return g_cfg.enrgb;
     }
 }
 
@@ -201,10 +211,14 @@ static const WCHAR* StateName(ImeState s) {
 static DWORD WINAPI DetectorThread(LPVOID param) {
     (void)param;
     int pollMs = g_cfg.pollMs, trackMs = g_cfg.trackMs;
+    /* 中英模式查询（跨进程 SendMessage）仅在其结果会影响显示时才做：
+       En 与 Cn 至少一个非 0 才查；两个都是 0（都不显示）时跳过，避免卡顿。 */
+    const int needMode = (g_cfg.enrgb != 0 || g_cfg.cnrgb != 0);
     ULONGLONG lastPoll = 0;
     int shown = 0;
     ImeState cur = IMEST_EN;
     int wasLogging = 0;
+    int wasBlocked = 0;
     WCHAR lastFg[256] = L"";
 
     for (;;) {
@@ -225,33 +239,27 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
         }
         wasLogging = g_logging ? 1 : 0;
 
-        /* 黑名单：前台程序命中 -> 整段隐藏 */
-        if (CfgBlockedForeground()) {
-            if (g_logging) DbgLog(L"BLOCKED (ignore-list)");
-            if (shown) { OverlaySetVisible(0); shown = 0; }
-            continue;
+        /* [Ignore] 命中：跳过中英状态检测（中文组合查询会跨进程发消息，可能
+           卡顿）。光标追踪照常，圆点保持上一次颜色。 */
+        int blocked = CfgBlockedForeground();
+        if (blocked != wasBlocked) {
+            wasBlocked = blocked;
+            if (g_logging) DbgLog(L"%s", blocked ? L"IGNORE: skip-detect" : L"IGNORE: resume-detect");
         }
 
-        /* 状态（按 pollMs 节流重算颜色） */
+        /* 状态（按 pollMs 节流重算颜色）；命中黑名单时本段跳过 */
         ULONGLONG now = GetTickCount64();
-        if (now - lastPoll >= (ULONGLONG)pollMs) {
+        if (!blocked && now - lastPoll >= (ULONGLONG)pollMs) {
             lastPoll = now;
-            if (ImeIsCapsLock())            cur = IMEST_CAPS;
-            else if (ImeIsEnglishKeyboard()) cur = IMEST_KBD_EN;
-            else if (ImeIsChineseMode())    cur = IMEST_HIDDEN;  /* 中文输入：不显示 */
-            else                            cur = IMEST_EN;      /* 中文输入法英文档 */
-            DWORD color, alpha = g_cfg.dotAlpha;
-            switch (cur) {
-            case IMEST_CAPS:   color = g_cfg.capsrgb;   break;
-            case IMEST_KBD_EN: color = g_cfg.kbdEnrgb;  break;
-            default:           color = g_cfg.cnrgb;     break; /* 显隐由下面 want 决定 */
-            }
-            OverlaySetColor(color, alpha);
+            if (ImeIsCapsLock())                       cur = IMEST_CAPS;
+            else if (ImeIsEnglishKeyboard())            cur = IMEST_KBD_EN;
+            else if (needMode && ImeIsChineseMode())   cur = IMEST_CN;
+            else                                       cur = IMEST_EN;
+            OverlaySetColor(StateColor(cur), g_cfg.dotAlpha);
         }
 
-        /* 中文输入不显示；英文/英文键盘受 ShowWhenEnglish 控制；大写键始终显示 */
-        int want = (cur == IMEST_CAPS) ||
-                   ((cur == IMEST_EN || cur == IMEST_KBD_EN) && g_cfg.showEn);
+        /* 通用规则：当前状态色值为 0 -> 不显示圆点（如 Cn=0 时中文态隐藏） */
+        int want = (StateColor(cur) != 0);
 
         /* 光标追踪：找到就跟随，找不到就隐藏 */
         CaretPos cp;

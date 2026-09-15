@@ -18,28 +18,27 @@
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "imm32.lib")
 
-/* 颜色以 0x00RRGGBB 存放（不透明）；透明度在 overlay 里统一换算 */
+/* 颜色以 0x00RRGGBB 存放（不透明）；透明度在 overlay 里统一换算。
+   通用规则：色值为 0 表示该状态不显示圆点（En/Caps/KbdEn/Cn 一致）。 */
 typedef struct {
-    DWORD        cnrgb;   /* 中文输入（保留位，默认与 en 相同，用户可自定义） */
-    DWORD        enrgb;   /* 英文（默认橘色）                                  */
-    DWORD        capsrgb; /* 大写键 Caps Lock（默认红色）                     */
-    DWORD        kbdEnrgb;/* 英文键盘布局（默认紫色）                         */
+    DWORD        cnrgb;   /* 中文输入（默认 0=不显示；设颜色则中文态显示）      */
+    DWORD        enrgb;   /* 英文（默认橘色；0=不显示）                        */
+    DWORD        capsrgb; /* 大写键 Caps Lock（默认蓝色；0=不显示）            */
+    DWORD        kbdEnrgb;/* 英文键盘布局（默认紫色；0=不显示）               */
     DWORD        dotAlpha;/* 0..255：圆点不透明度                                */
     int          size;    /* 圆点直径（像素）                                    */
     int          offsetX; /* 相对光标左缘的水平偏移（+ 右）                       */
     int          offsetY; /* 相对光标底缘的垂直偏移（+ 下）                       */
     int          pollMs;  /* 状态检测间隔                                        */
     int          trackMs; /* 光标追踪间隔                                        */
-    int          showEn;  /* 英文态是否显示圆点                                    */
 } ImeCfg;
 
 /* 状态判定结果 */
 typedef enum {
-    IMEST_BLOCKED = 0, /* 前台程序在黑名单：隐藏        */
-    IMEST_EN,          /* 英文（中文输入法/其他布局，默认橘色） */
-    IMEST_CAPS,        /* 大写键 Caps Lock（红）         */
-    IMEST_KBD_EN,      /* 英文键盘布局（紫）             */
-    IMEST_HIDDEN,      /* 无有效光标 / showEn=0：隐藏    */
+    IMEST_EN = 0,      /* 英文（中文输入法的英文档）       */
+    IMEST_CAPS,        /* 大写键 Caps Lock                 */
+    IMEST_KBD_EN,      /* 英文键盘布局                     */
+    IMEST_CN,          /* 中文输入                          */
     IMEST_COUNT
 } ImeState;
 

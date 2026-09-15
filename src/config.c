@@ -8,7 +8,7 @@
    [General]   键值项（Key = Value）
    [Colors]    三/四状态颜色（#RRGGBB 或 #RRGGBBAA）+ 全局透明度
    [Overlay]   圆点尺寸与光标偏移、检测间隔
-   [Ignore]    程序黑名单：前台是这些进程时完全不显示（规避游戏卡顿）
+   [Ignore]    程序黑名单：前台是这些进程时跳过中英状态检测（规避游戏卡顿）
    文件不存在时写一份带注释的模板。颜色值只认前导 #RRGGBB 解析，
    解析失败回退默认。 */
 
@@ -72,11 +72,24 @@ static DWORD ParseColorA(const char* v, DWORD defRgb, DWORD defAlpha, DWORD* aou
     return rgb;
 }
 
+/* 通用规则：色值写 0（可带行内注释）表示该状态不显示圆点；
+   其余按 #RRGGBB 解析，解析失败回退默认。 */
+static DWORD ParseColor0(const char* v, DWORD defRgb, DWORD defAlpha, DWORD* aout) {
+    if (v) {
+        while (*v==' '||*v=='\t') v++;
+        if (v[0]=='0' && (v[1]==0 || v[1]==' ' || v[1]=='\t' || v[1]==';')) {
+            if (aout) *aout=defAlpha;
+            return 0;
+        }
+    }
+    return ParseColorA(v, defRgb, defAlpha, aout);
+}
+
 /* ---------- 默认值 ---------- */
 #define DEF_EN_RGB  0xFF8C00   /* 橘                                     */
-#define DEF_CAPS_RGB 0xFF0000  /* 红                                     */
+#define DEF_CAPS_RGB 0x0080FF  /* 蓝                                     */
 #define DEF_KBDEN_RGB 0x8B00FF /* 紫                                     */
-#define DEF_ALPHA   190
+#define DEF_ALPHA   255
 
 static void SrcOfPath(WCHAR* out, size_t cap) {
     WCHAR exe[MAX_PATH]; DWORD n=GetModuleFileNameW(NULL, exe, MAX_PATH);
@@ -91,8 +104,9 @@ static void SrcOfPath(WCHAR* out, size_t cap) {
 void CfgLoad(ImeCfg* c) {
     WCHAR path[MAX_PATH]; SrcOfPath(path, MAX_PATH);
     int defAl=DEF_ALPHA;
-    DWORD en=DEF_EN_RGB, caps=DEF_CAPS_RGB, kbden=DEF_KBDEN_RGB, cn=DEF_EN_RGB;
-    c->size=8; c->offsetX=2; c->offsetY=4; c->pollMs=100; c->trackMs=15; c->showEn=1;
+    DWORD en=DEF_EN_RGB, caps=DEF_CAPS_RGB, kbden=DEF_KBDEN_RGB;
+    DWORD cn=0;   /* Cn 默认 0：中文态不显示圆点（通用 0 规则） */
+    c->size=8; c->offsetX=2; c->offsetY=4; c->pollMs=100; c->trackMs=15;
 
     FILE* f=NULL;
     if (_wfopen_s(&f, path, L"rb")!=0 || !f) {
@@ -104,15 +118,15 @@ void CfgLoad(ImeCfg* c) {
             ";\n"
             "PollIntervalMs = 100    ; 状态(中英/大写/黑名单)检测间隔(ms)\n"
             "TrackIntervalMs = 15    ; 光标坐标追踪间隔(ms)\n"
-            "ShowWhenEnglish = 1     ; 英文态是否显示圆点（1 显示 / 0 隐藏）\n"
             ";\n"
             "[Colors]\n"
             "; 颜色格式：#RRGGBB 或 #RRGGBBAA（AA=十六进制不透明度，留空用下面 Alpha）\n"
+            "; 通用规则：色值写 0 表示该状态不显示圆点\n"
             "En   = #FF8C00   ; 英文（默认橘色）\n"
-            "Caps = #FF0000   ; 大写键 Caps Lock（默认红色）\n"
+            "Caps = #0080FF   ; 大写键 Caps Lock（默认蓝色）\n"
             "KbdEn= #8B00FF   ; 英文键盘布局（默认紫色）\n"
-            "Cn   = #FF8C00   ; 中文输入（默认与英文同色；如需区分中文请改这里）\n"
-            "Alpha= 190       ; 圆点全局不透明度 0..255（0=全透）\n"
+            "Cn   = 0         ; 中文输入（0=不显示；设颜色值则中文态显示该色）\n"
+            "Alpha= 255       ; 圆点全局不透明度 0..255（0=全透）\n"
             ";\n"
             "[Overlay]\n"
             "Size    = 8      ; 圆点直径（像素）\n"
@@ -120,7 +134,7 @@ void CfgLoad(ImeCfg* c) {
             "OffsetY = 4      ; 相对光标底缘的垂直偏移（+ 下）\n"
             ";\n"
             "[Ignore]\n"
-            "; 前台程序命中名单时完全不显示（规避某些游戏/程序卡顿）。\n"
+            "; 前台程序命中名单时，跳过中英状态检测（检测本身可能卡顿，而非圆点显示）。\n"
             "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写。\n"
             "; 例：\n"
             "; somegame.exe\n";
@@ -173,7 +187,6 @@ void CfgLoad(ImeCfg* c) {
                                     WideCharToMultiByte(CP_UTF8,0,v,-1,vb,(int)sizeof(vb),0,0);
                                     if (ISAME(kb,"pollintervalms"))   c->pollMs=ParseIntA(vb,100,5,60000);
                                     else if (ISAME(kb,"trackintervalms")) c->trackMs=ParseIntA(vb,15,5,200);
-                                    else if (ISAME(kb,"showwhenenglish")) c->showEn = (vb[0]=='1');
                                 } else if (sec==1 && eq) {
                                     *eq=0;
                                     WCHAR k[CFG_NAME_MAX], v[128];
@@ -184,11 +197,11 @@ void CfgLoad(ImeCfg* c) {
                                     WideCharToMultiByte(CP_UTF8,0,k,-1,kb,(int)sizeof(kb),0,0);
                                     WideCharToMultiByte(CP_UTF8,0,v,-1,vb,(int)sizeof(vb),0,0);
                                     DWORD al=defAl;
-                                    if (ISAME(kb,"en"))   en  =ParseColorA(vb,en,defAl,&al);
-                                    else if (ISAME(kb,"caps")) caps=ParseColorA(vb,caps,defAl,&al);
-                                    else if (ISAME(kb,"kbden"))kbden=ParseColorA(vb,kbden,defAl,&al);
-                                    else if (ISAME(kb,"cn"))  cn  =ParseColorA(vb,cn,defAl,&al);
-                                    else if (ISAME(kb,"alpha")) defAl=ParseIntA(vb,190,0,255);
+                                    if (ISAME(kb,"en"))   en  =ParseColor0(vb,en,defAl,&al);
+                                    else if (ISAME(kb,"caps")) caps=ParseColor0(vb,caps,defAl,&al);
+                                    else if (ISAME(kb,"kbden"))kbden=ParseColor0(vb,kbden,defAl,&al);
+                                    else if (ISAME(kb,"cn"))  cn  =ParseColor0(vb,cn,defAl,&al);
+                                    else if (ISAME(kb,"alpha")) defAl=ParseIntA(vb,255,0,255);
                                 } else if (sec==2 && eq) {
                                     *eq=0;
                                     WCHAR k[CFG_NAME_MAX], v[128];
