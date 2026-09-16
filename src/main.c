@@ -293,6 +293,10 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
     ZeroMemory(&pr, sizeof(pr));
     pr.opened = -1;
     pr.conv = -1;
+    HWND lastTop = NULL;        /* 上一次的前台顶层窗口 */
+    int  settleGate = 0;        /* 1=刚换窗口、状态未定，这段不显示圆点 */
+    ULONGLONG gateAt = 0;       /* 闸门最近一次"收起"的时刻 */
+    int  wasSettling = 0;       /* 上一拍的 settling，用来抓 0->1 跳变 */
 
     for (;;) {
         Sleep(trackMs > 0 ? (DWORD)trackMs : 15);
@@ -321,8 +325,23 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             if (g_logging) DbgLog(L"%s", blocked ? L"IGNORE: skip-detect" : L"IGNORE: resume-detect");
         }
 
-        /* 状态（按 pollMs 节流重算颜色）；命中黑名单时本段跳过 */
+        /* 前台顶层窗口换了：**立刻**重算状态（别等 pollMs 那一拍，否则旧状态
+           会多显示最多 100ms），并进入"状态未定"期 —— 这期间显示任何颜色都是猜的。
+           判定用顶层窗口而不是焦点控件：同一个窗口内换控件（浏览器地址栏↔页面）
+           不该让点闪一下；那种情况交给 ime.c 的 settling 去挡（它本来就按焦点控件
+           判稳定），两者合起来覆盖完整。 */
         ULONGLONG now = GetTickCount64();
+        HWND top = GetForegroundWindow();
+        if (top != lastTop) {
+            lastTop = top;
+            lastPoll = 0;
+            settleGate = 1;
+            gateAt = now;
+            if (g_logging) DbgLog(L"settle: arm fg=%p", (void*)top);
+        }
+        if (blocked) settleGate = 0;   /* 黑名单期间不重算状态，别把点一直藏着 */
+
+        /* 状态（按 pollMs 节流重算颜色）；命中黑名单时本段跳过 */
         int stateChanged = 0;
         if (!blocked && now - lastPoll >= (ULONGLONG)pollMs) {
             lastPoll = now;
@@ -349,8 +368,35 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             }
         }
 
-        /* 通用规则：当前状态色为 IME_COLOR_NONE -> 不显示圆点（如 Cn=0 时中文态隐藏） */
-        int want = (StateColor(cur) != IME_COLOR_NONE);
+        /* 状态：ime.c 一旦报"未定"就跟着收着 —— 它发现焦点变化可能比顶层窗口变化
+           晚一拍，只靠上面那条会漏。 */
+        if (pr.settling && !wasSettling) { settleGate = 1; gateAt = now; }
+        wasSettling = pr.settling;
+
+        /* 前台窗口可能在本次迭代**中途**才换（切前台与焦点控件更新不同拍，
+           实测差 20~30ms），而上面那次检查跑在迭代开头 —— 显示前再确认一次，
+           把这点缝也堵上。 */
+        HWND topLate = GetForegroundWindow();
+        if (topLate != lastTop) {
+            lastTop = topLate;
+            lastPoll = 0;
+            settleGate = 1;
+            gateAt = now;
+            if (g_logging) DbgLog(L"settle: arm (late) fg=%p", (void*)topLate);
+        }
+
+        /* 放行条件：读数已稳 **且** 距上次收起至少过了 IME_SETTLE_MS。
+           只判 settling 会被"还没刷新的旧值"提前放行 —— 实测出现过闸门当拍就被
+           撤掉、旧颜色漏出来 20ms。加上最短按住时长，时序竞争也漏不出来。 */
+        if (settleGate && !pr.settling && now - gateAt >= (ULONGLONG)IME_SETTLE_MS) {
+            if (g_logging)
+                DbgLog(L"settle: release held=%I64u ms", (unsigned long long)(now - gateAt));
+            settleGate = 0;
+        }
+
+        /* 通用规则：当前状态色为 IME_COLOR_NONE -> 不显示圆点（如 Cn=0 时中文态隐藏）。
+           "状态未定"期间同样不显示：宁可这段短暂没有点，也不要先亮错颜色再消失。 */
+        int want = (!settleGate) && (StateColor(cur) != IME_COLOR_NONE);
 
         /* 光标追踪：找到就跟随，找不到就隐藏 */
         CaretPos cp;
@@ -373,11 +419,11 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             }
             if (stateChanged || fgChanged || now - lastLog >= 500) {
                 lastLog = now;
-                DbgLog(L"state=%s want=%d caret=%s(%d,%d,h=%d) src=%s fs=%d | "
+                DbgLog(L"state=%s want=%d caret=%s(%d,%d,h=%d) src=%s fs=%d gate=%d | "
                        L"opened=%d conv=0x%X ok=%d strat=%d nb=%d | %s",
                        StateName(cur), want, got ? L"hit" : L"miss",
                        cp.x, cp.y, cp.h, SrcName(cp.source),
-                       CaretIsForegroundFullscreen(),
+                       CaretIsForegroundFullscreen(), settleGate,
                        pr.opened, (DWORD)pr.conv, pr.ok, pr.strategy, pr.nonBinary,
                        fg);
             }

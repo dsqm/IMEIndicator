@@ -41,8 +41,11 @@ typedef struct {
     int          hideFullscreen; /* 1=前景窗口全屏时不显示圆点（看视频不遮挡）    */
 } ImeCfg;
 
-/* 状态判定结果 */
-typedef enum {
+/* 换窗口后，向 IME 问到的仍是**上一个窗口**的值（实测滞后 200~300ms）。
+   读数要稳定这么久才算可信 —— ime.c 判稳定、检测线程收圆点共用这时长。 */
+#define IME_SETTLE_MS 200
+
+/* 状态判定结果 */typedef enum {
     IMEST_EN = 0,      /* 英文（中文输入法的英文档）       */
     IMEST_CAPS,        /* 大写键 Caps Lock                 */
     IMEST_KBD_EN,      /* 英文键盘布局                     */
@@ -82,6 +85,7 @@ typedef struct {
     int   conv;      /* IMC_GETCONVERSIONMODE 原始值（-1=没取到）  */
     int   strategy;  /* 0=复合兜底 1=open 状态 2=转换模式          */
     int   nonBinary; /* 1=该输入法 open 状态不是 0/1               */
+    int   settling;  /* 1=刚换了窗口、读数尚未稳定（值不可信）      */
 } ImeProbe;
 
 int    ImeIsChineseModeEx(ImeProbe* p);  /* p 可为 NULL：同 ImeIsChineseMode */
