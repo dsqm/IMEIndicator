@@ -48,9 +48,13 @@ static void LogChFail(const WCHAR* ch, const WCHAR* why, HRESULT hr) {
 /* 文本范围的边界矩形 -> CaretPos（BoundingRectangles 是 double SAFEARRAY，
    每个矩形 4 个元素：左 上 宽 高；单位=屏幕坐标）。某些实现给空数组
    时尝试先 ExpandToEnclosingUnit(Character) 再取。 */
-static int UiRect(CaretPos* out, IUIAutomationTextRange* range) {
+static int UiRect(CaretPos* out, IUIAutomationTextRange* range, const WCHAR* ch) {
     SAFEARRAY* arr = NULL;
-    if (FAILED(range->GetBoundingRectangles(&arr)) || !arr) return 0;
+    HRESULT hr = range->GetBoundingRectangles(&arr);
+    if (FAILED(hr) || !arr) {
+        LogChFail(ch, L"GetBoundingRectangles failed", hr);
+        return 0;
+    }
     long lb = 0, ub = -1;
     SafeArrayGetLBound(arr, 1, &lb);
     SafeArrayGetUBound(arr, 1, &ub);
@@ -67,6 +71,15 @@ static int UiRect(CaretPos* out, IUIAutomationTextRange* range) {
         }
     }
     SafeArrayDestroy(arr);
+    if (!ok) {
+        /* 空数组/元素数异常：某些 provider 就是给不出矩形，留痕便于区分 */
+        static ULONGLONG last = 0;
+        ULONGLONG now = GetTickCount64();
+        if (!last || now - last >= 2000) {
+            last = now;
+            DbgLog(L"%s: BoundingRectangles empty (n=%ld)", ch, n);
+        }
+    }
     return ok;
 }
 
@@ -158,12 +171,15 @@ static IUIAutomationElement* UiaFindPattern(IUIAutomationElement* start, BOOL wa
     IUIAutomationTreeWalker* rawWalker = NULL;
     if (g_uia) g_uia->get_RawViewWalker(&rawWalker);
 
+    int found = 0;
     for (int depth = 0; e && depth < 24; depth++) {
         IUnknown* pat = NULL;
         if (SUCCEEDED(e->GetCurrentPattern(want2 ? UIA_TextPattern2Id : UIA_TextPatternId, &pat)) && pat) {
             pat->Release();
             if (walker) walker->Release();
             if (rawWalker) rawWalker->Release();
+            if (depth > 0)
+                DbgLog(L"uia: pattern found at depth %d (want2=%d)", depth, want2);
             return e;                 /* 找到了，调用方持有引用 */
         }
         if (pat) pat->Release();
@@ -176,10 +192,21 @@ static IUIAutomationElement* UiaFindPattern(IUIAutomationElement* start, BOOL wa
         if (FAILED(hr) || !parent) { e->Release(); e = NULL; break; }
         e->Release();
         e = parent;
+        found = depth + 1;
     }
     if (e) e->Release();
     if (walker) walker->Release();
     if (rawWalker) rawWalker->Release();
+    /* 向上爬到顶都没找到 pattern —— 这是 UIA 通道 miss 的主路径之一，必须留痕 */
+    {
+        static ULONGLONG last = 0;
+        ULONGLONG now = GetTickCount64();
+        if (!last || now - last >= 2000) {
+            last = now;
+            DbgLog(L"uia: no TextPattern%s ancestor (want2=%d, walked %d levels)",
+                   want2 ? L"2" : L"", want2, found);
+        }
+    }
     return NULL;
 }
 
@@ -215,9 +242,9 @@ static int ViaUiaCaretRange(CaretPos* out) {
                    再往下走 MSAA —— 那会拿回一个过期的坐标把点钉在屏幕上。
                    取到文本模式却说没活动光标，就是明确的"没有光标"。 */
                 if (active) {
-                    ok = UiRect(out, range);
+                    ok = UiRect(out, range, L"uia_caret");
                     if (!ok && SUCCEEDED(range->ExpandToEnclosingUnit(TextUnit_Character)))
-                        ok = UiRect(out, range);
+                        ok = UiRect(out, range, L"uia_caret");
                 } else {
                     ok = -1;   /* 明确无光标 */
                 }
@@ -258,7 +285,7 @@ static int ViaUiaSelection(CaretPos* out) {
                 if (SUCCEEDED(sel->get_Length(&n)) && n >= 1) {
                     IUIAutomationTextRange* range = NULL;
                     if (SUCCEEDED(sel->GetElement(0, &range))) {
-                        ok = UiRect(out, range);
+                        ok = UiRect(out, range, L"uia_sel");
                         range->Release();
                     }
                 }
@@ -476,7 +503,14 @@ void CaretWorkerStop(void) {
 /* 带超时的光标查询：把活儿交给查询线程，最多等 g_timeoutMs。
    返回 1=拿到本轮的坐标（序号对得上保证不是过期结果）。
    返回 0 时看 *timeoutOut：1 = 本轮等超时了（前台程序卡住），0 = 正常地没有光标。
-   两者必须分开 —— 前者沿用上一轮显示，后者才收起圆点。 */
+   两者必须分开 —— 前者沿用上一轮显示，后者才收起圆点。
+
+   ★ 必须**循环收应答**：worker 一次 probe 偶尔超过轮询间隔（跨进程调用 200ms+
+   很常见）时，它会先 ack 上一轮请求 —— 那个"旧 ack"会立刻唤醒正在等本轮的
+   检测线程。若把旧 ack 当失败返回，之后每轮都会被 worker 的旧 ack 唤醒、
+   每轮都 miss，而 wait 又总能被唤醒 → 连续超时计数永远不涨 → 自愈永不触发
+   → 圆点永久消失（重启才好的那次故障就是它）。所以旧 ack 只能忽略并继续等，
+   worker 处理完堆积请求后自然会 ack 到本轮序号。 */
 int CaretGetPosEx(CaretPos* out, int* timeoutOut) {
     CaretPos local;
     if (!out) out = &local;
@@ -491,35 +525,48 @@ int CaretGetPosEx(CaretPos* out, int* timeoutOut) {
 
     LONG seq = InterlockedIncrement(&g_reqSeq);
     SetEvent(g_reqEv);
-    if (WaitForSingleObject(g_ackEv, (DWORD)g_timeoutMs) != WAIT_OBJECT_0) {
+    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)g_timeoutMs;
+    int got = 0;
+    for (;;) {
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadline) break;                        /* 总超时 */
+        DWORD remain = (DWORD)(deadline - now);
+        if (WaitForSingleObject(g_ackEv, remain) != WAIT_OBJECT_0) break;  /* 总超时 */
+        if (InterlockedCompareExchange(&g_ackSeq, 0, 0) >= seq) { got = 1; break; }
+        /* 旧 ack：worker 正在追之前堆积的请求，继续等它追到本轮 */
+    }
+
+    if (!got) {
         /* ★ 连续超时 = worker 很可能永久卡死在跨进程调用里：换代重建，
-           否则此后每轮都超时，圆点永远不再显示（重启才能恢复的那种症状）。 */
+           否则此后每轮都超时，圆点永远不再显示。 */
         if (++consecTimeouts >= CARET_RESTART_AFTER) {
             consecTimeouts = 0;
             static ULONGLONG lastRe = 0;
             ULONGLONG now = GetTickCount64();
+            /* 重建本身限频 5 秒：纯"慢"（非卡死）的前台程序会持续超时，
+               不限频会每 3 秒白重建一次。 */
             if (!lastRe || now - lastRe >= 5000) {
                 lastRe = now;
                 DbgLog(L"caret: worker stuck (%d consecutive timeouts) -- respawning", CARET_RESTART_AFTER);
+                InterlockedIncrement(&g_gen);      /* 旧线程醒来见代际不符自行退出 */
+                if (g_workerTh) { CloseHandle(g_workerTh); g_workerTh = NULL; }  /* detach */
+                /* 旧 UIA 对象不 Release（旧 worker 可能还悬在它的调用上），直接弃用换新：
+                   若卡死发生在本地代理锁上，复用旧对象会让新 worker 跟着卡。 */
+                g_uia = NULL;
+                CaretSpawnWorker();                /* 新事件对 + 新线程 + 新 COM 对象 */
             }
-            InterlockedIncrement(&g_gen);      /* 旧线程醒来见代际不符自行退出 */
-            if (g_workerTh) { CloseHandle(g_workerTh); g_workerTh = NULL; }  /* detach */
-            /* 旧 UIA 对象不 Release（旧 worker 可能还悬在它的调用上），直接弃用换新：
-               若卡死发生在本地代理锁上，复用旧对象会让新 worker 跟着卡。 */
-            g_uia = NULL;
-            CaretSpawnWorker();                /* 新事件对 + 新线程 + 新 COM 对象 */
         }
         if (timeoutOut) *timeoutOut = 1;
         static ULONGLONG last = 0;
-        ULONGLONG now = GetTickCount64();
-        if (!last || now - last >= 1000) {
-            last = now;
+        ULONGLONG now2 = GetTickCount64();
+        if (!last || now2 - last >= 1000) {
+            last = now2;
             DbgLog(L"caret: query timeout >%dms (foreground app busy) -- keep last state", g_timeoutMs);
         }
         return 0;
     }
     consecTimeouts = 0;
-    if (InterlockedCompareExchange(&g_ackSeq, 0, 0) != seq) return 0;  /* 过期结果，不用 */
+    if (InterlockedCompareExchange(&g_ackSeq, 0, 0) != seq) return 0;  /* 防御：不应发生 */
     *out = g_result;
     return out->found ? 1 : 0;
 }
