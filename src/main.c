@@ -398,10 +398,17 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
            "状态未定"期间同样不显示：宁可这段短暂没有点，也不要先亮错颜色再消失。 */
         int want = (!settleGate) && (StateColor(cur) != IME_COLOR_NONE);
 
-        /* 光标追踪：找到就跟随，找不到就隐藏 */
+        /* 光标追踪：找到就跟随，找不到就隐藏。
+           CaretGetPosEx 内部是"交给查询线程 + 按超时等"：前台程序卡住时它返回 0
+           而不是把检测线程一起冻住。这种情况**沿用上一轮的显示状态** —— 否则
+           浏览器卡一下圆点就消失，看上去跟"坏了"一样。 */
         CaretPos cp;
         ZeroMemory(&cp, sizeof(cp));
-        int got = (want && CaretGetPos(&cp));
+        int got = 0, caretTimedOut = 0;
+        if (want) {
+            got = CaretGetPosEx(&cp, &caretTimedOut);
+            if (!got && caretTimedOut) got = shown;   /* 超时：保持现状 */
+        }
 
         /* 日志：状态变化 / 前台窗口变化 / 每 500ms 心跳各记一行。
            不能只在"找到光标"时写 —— 光标一丢就整个日志空掉，查不到问题。 */
@@ -419,11 +426,11 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             }
             if (stateChanged || fgChanged || now - lastLog >= 500) {
                 lastLog = now;
-                DbgLog(L"state=%s want=%d caret=%s(%d,%d,h=%d) src=%s fs=%d gate=%d | "
+                DbgLog(L"state=%s want=%d caret=%s(%d,%d,h=%d) src=%s fs=%d gate=%d to=%d | "
                        L"opened=%d conv=0x%X ok=%d strat=%d nb=%d | %s",
                        StateName(cur), want, got ? L"hit" : L"miss",
                        cp.x, cp.y, cp.h, SrcName(cp.source),
-                       CaretIsForegroundFullscreen(), settleGate,
+                       CaretIsForegroundFullscreen(), settleGate, caretTimedOut,
                        pr.opened, (DWORD)pr.conv, pr.ok, pr.strategy, pr.nonBinary,
                        fg);
             }
@@ -460,6 +467,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     OverlaySetColor(StateColor(IMEST_EN), g_cfg.dotAlpha);  /* 首帧色（未变状态前用它） */
     TrayInstall();
 
+    /* 光标查询走独立线程 + 超时：跨进程 UIA/MSAA 调用没有超时参数，前台程序
+       卡住会把调用方一起冻住（心跳断档数秒就是这么来的）。 */
+    CaretWorkerStart(g_cfg.caretTimeoutMs);
+
     HANDLE th = CreateThread(NULL, 0, DetectorThread, NULL, 0, NULL);
     if (!th) return 1;
 
@@ -472,6 +483,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     InterlockedExchange(&g_showDot, -1);   /* 通知 worker 退出 */
     WaitForSingleObject(th, 1000);
     CloseHandle(th);
+    CaretWorkerStop();                     /* 检测线程已退出，此时回收查询线程 */
     TrayRemove();
     OverlayShutdown();
     SingleInstanceRelease();

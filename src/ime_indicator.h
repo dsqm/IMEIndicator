@@ -39,6 +39,8 @@ typedef struct {
     int          trackMs; /* 光标追踪间隔                                        */
     int          imeStrategy; /* 中英判定策略：0=自动学习 1=open状态 2=转换模式    */
     int          hideFullscreen; /* 1=前景窗口全屏时不显示圆点（看视频不遮挡）    */
+    int          caretTimeoutMs; /* 单次光标查询最长等待(ms)：超时即放弃本轮，
+                                    前台程序卡住时不让检测线程跟着冻住        */
 } ImeCfg;
 
 /* 换窗口后，向 IME 问到的仍是**上一个窗口**的值（实测滞后 200~300ms）。
@@ -102,7 +104,20 @@ typedef enum {
     CARET_IME        /* IME 组合窗口 */
 } CaretSource;
 typedef struct { int x, y, h; int found; CaretSource source; } CaretPos;
-int    CaretGetPos(CaretPos* out);   /* 0=失败 1=成功，坐标=屏幕物理像素 */
+
+/* ---- caret.c ----
+   光标查询会**跨进程**调 UIA/MSAA，这些调用没有任何超时机制：前台程序
+   （尤其浏览器/Electron）线程一卡，调用就悬着不走，检测线程跟着冻住数秒
+   （日志表现为心跳断档）。所以查询放在**独立线程**里做，调用方只按
+   caretTimeoutMs 等事件；超时就放弃本轮（沿用上一轮结果），检测线程照常转。
+   CaretWorkerStart 在检测线程初始化时调一次，CaretWorkerStop 在退出时调。 */
+void   CaretWorkerStart(int timeoutMs);   /* 建查询线程；timeoutMs<=0 用默认值 */
+void   CaretWorkerStop(void);             /* 通知线程退出并回收（最坏等一次查询） */
+/* out 可为 NULL（只想知道成功与否）。timeoutOut 可传 NULL：
+   返回 0 且 *timeoutOut=1 表示"本轮查询超时"（前台程序卡住），
+   与"确实没有光标"要分开处理 —— 前者沿用上一轮显示，后者才藏起来。
+   返回 1 时 out 里是屏幕物理像素坐标。 */
+int    CaretGetPosEx(CaretPos* out, int* timeoutOut);
 int    CaretIsForegroundFullscreen(void); /* 前景窗口是否全屏（日志诊断用） */
 
 /* ---- overlay.c ---- */

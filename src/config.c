@@ -105,6 +105,7 @@ void CfgLoad(ImeCfg* c) {
     c->size=9; c->offsetX=2; c->offsetY=4; c->pollMs=100; c->trackMs=15;
     c->imeStrategy=0;
     c->hideFullscreen=1;
+    c->caretTimeoutMs=150;
 
     FILE* f=NULL;
     if (_wfopen_s(&f, path, L"rb")!=0 || !f) {
@@ -123,6 +124,10 @@ void CfgLoad(ImeCfg* c) {
             "; 前景窗口处于全屏时（看视频/演示）隐藏圆点：全屏下光标检测会拿到上一次\n"
             "; 的陈旧坐标，圆点会一直钉在画面上挡视线。\n"
             "HideWhenFullscreen = 1\n"
+            ";\n"
+            "; 单次光标查询最长等待(ms)：光标检测要跨进程问 UIA/MSAA，对方程序卡住时\n"
+            "; 会一直不返回。超时即放弃本轮查询（沿用上一轮显示），不冻结检测线程。\n"
+            "CaretTimeoutMs = 150\n"
             ";\n"
             "[Colors]\n"
             "; 颜色格式固定 #RRGGBB（6 位十六进制，必须带 #）；透明度一律用下面的 Alpha\n"
@@ -196,6 +201,7 @@ void CfgLoad(ImeCfg* c) {
                                     else if (ISAME(kb,"trackintervalms")) c->trackMs=ParseIntA(vb,15,5,200);
                                     else if (ISAME(kb,"imestrategy")) c->imeStrategy=ParseIntA(vb,0,0,2);
                                     else if (ISAME(kb,"hidewhenfullscreen")) c->hideFullscreen=ParseIntA(vb,1,0,1);
+                                    else if (ISAME(kb,"carettimeoutms")) c->caretTimeoutMs=ParseIntA(vb,150,20,5000);
                                 } else if (sec==1 && eq) {
                                     *eq=0;
                                     WCHAR k[CFG_NAME_MAX], v[128];

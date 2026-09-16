@@ -304,7 +304,9 @@ static void LogNoCaret(const WCHAR* why) {
         }                                                                     \
     } while (0)
 
-int CaretGetPos(CaretPos* out) {
+/* ---------- 单次探测（**会阻塞**：内部是跨进程 UIA/MSAA 调用） ----------
+   只能在查询线程里跑，别在检测线程直接调 —— 这就是超时机制存在的理由。 */
+static int CaretProbeOnce(CaretPos* out) {
     EnsureUia();
     out->found = 0;
     out->source = CARET_NONE;
@@ -325,4 +327,109 @@ done:
     if (out->source != CARET_NONE) { out->found = 1; return 1; }
     out->x = out->y = out->h = 0;
     return 0;
+}
+
+/* ================= 查询线程 + 超时 =================
+   UIA/MSAA 是跨进程调用，**没有超时参数**：对方线程不泵消息，调用就一直悬着
+   （实测前台浏览器卡住时检测线程冻 6 秒，日志心跳直接断档）。解决办法是把
+   查询隔离到独立线程，调用方按时间等事件，超时就放弃本轮。
+
+   请求/应答协议（不用互斥量，靠"序号 + 事件"，杜绝互相等待）：
+     reqSeq    检测线程递增后 SetEvent(reqEv)，表示"又有一轮要查"
+     ackSeq    查询线程查完写回它对应的序号，SetEvent(ackEv)
+   检测线程拿到 ackSeq==自己的 reqSeq 才采纳结果；否则视为超时/过期，
+   直接返回失败（沿用上一轮显示状态）。过期结果也不会被误用，因为序号对不上。
+
+   线程退出：stop=1 后 SetEvent(reqEv) 唤醒它，它看到就收工（最坏情况下它
+   正卡在一次跨进程调用里，WaitForSingleObject 给有限等待，超时就 detach
+   式放弃句柄 —— 进程马上要退，不值得为它无限等）。 */
+#define CARET_DEFAULT_TIMEOUT_MS 150
+
+static HANDLE          g_reqEv = NULL;    /* 检测线程 -> 查询线程：有新请求 */
+static HANDLE          g_ackEv = NULL;    /* 查询线程 -> 检测线程：结果就绪 */
+static HANDLE          g_workerTh = NULL;
+static volatile LONG   g_reqSeq = 0;
+static volatile LONG   g_ackSeq = 0;
+static volatile LONG   g_stop = 0;
+static volatile LONG   g_workerDone = 0;
+static int             g_timeoutMs = CARET_DEFAULT_TIMEOUT_MS;
+static CaretPos        g_result;          /* 仅查询线程写，靠序号/事件保证读时已写完 */
+
+static DWORD WINAPI CaretWorkerThread(LPVOID param) {
+    (void)param;
+    /* 查询线程自己初始化 COM（UIA 客户端必须 MTA）—— 不能沿用检测线程的
+       apartment：CoInitializeEx 是按线程计的。 */
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) { InterlockedExchange(&g_workerDone, 1); return 0; }
+
+    LONG served = 0;
+    for (;;) {
+        DWORD w = WaitForSingleObject(g_reqEv, 1000);
+        if (InterlockedCompareExchange(&g_stop, 0, 0)) break;
+        if (w != WAIT_OBJECT_0) continue;            /* 超时只是醒来看看 stop */
+        LONG seq = InterlockedCompareExchange(&g_reqSeq, 0, 0);
+        if (seq == served) continue;                 /* 已经答过这一步 */
+        served = seq;
+        CaretPos r;
+        ZeroMemory(&r, sizeof(r));
+        CaretProbeOnce(&r);                          /* 可能阻塞数秒（就是它要被隔离） */
+        g_result = r;                                /* 先写数据，再放事件 */
+        InterlockedExchange(&g_ackSeq, served);
+        SetEvent(g_ackEv);
+    }
+    if (SUCCEEDED(hr)) CoUninitialize();
+    InterlockedExchange(&g_workerDone, 1);
+    return 0;
+}
+
+void CaretWorkerStart(int timeoutMs) {
+    if (g_workerTh) return;
+    g_timeoutMs = (timeoutMs >= 20 && timeoutMs <= 5000) ? timeoutMs : CARET_DEFAULT_TIMEOUT_MS;
+    g_reqEv = CreateEventW(NULL, FALSE, FALSE, NULL);   /* 自动重置：一次请求一次唤醒 */
+    g_ackEv = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!g_reqEv || !g_ackEv) return;
+    g_workerTh = CreateThread(NULL, 0, CaretWorkerThread, NULL, 0, NULL);
+}
+
+void CaretWorkerStop(void) {
+    /* 在检测线程（已退出循环）里调，不涉及并发 */
+    if (!g_workerTh) return;
+    InterlockedExchange(&g_stop, 1);
+    SetEvent(g_reqEv);
+    /* 正常情况下它立刻退出；万一正卡在一次跨进程调用里，给它一点时间就放手 ——
+       进程接着就结束了，为它无限等待不值得。 */
+    if (WaitForSingleObject(g_workerTh, 500) == WAIT_OBJECT_0) CloseHandle(g_workerTh);
+    g_workerTh = NULL;
+    if (g_reqEv) { CloseHandle(g_reqEv); g_reqEv = NULL; }
+    if (g_ackEv) { CloseHandle(g_ackEv); g_ackEv = NULL; }
+}
+
+/* 带超时的光标查询：把活儿交给查询线程，最多等 g_timeoutMs。
+   返回 1=拿到本轮的坐标（序号对得上保证不是过期结果）。
+   返回 0 时看 *timeoutOut：1 = 本轮等超时了（前台程序卡住），0 = 正常地没有光标。
+   两者必须分开 —— 前者沿用上一轮显示，后者才收起圆点。 */
+int CaretGetPosEx(CaretPos* out, int* timeoutOut) {
+    CaretPos local;
+    if (!out) out = &local;
+    out->found = 0;
+    out->source = CARET_NONE;
+    out->x = out->y = out->h = 0;
+    if (timeoutOut) *timeoutOut = 0;
+    if (!g_workerTh) return 0;                 /* 未启用超时机制：调用方自行处理 */
+
+    LONG seq = InterlockedIncrement(&g_reqSeq);
+    SetEvent(g_reqEv);
+    if (WaitForSingleObject(g_ackEv, (DWORD)g_timeoutMs) != WAIT_OBJECT_0) {
+        if (timeoutOut) *timeoutOut = 1;
+        static ULONGLONG last = 0;
+        ULONGLONG now = GetTickCount64();
+        if (!last || now - last >= 1000) {
+            last = now;
+            DbgLog(L"caret: query timeout >%dms (foreground app busy) -- keep last state", g_timeoutMs);
+        }
+        return 0;
+    }
+    if (InterlockedCompareExchange(&g_ackSeq, 0, 0) != seq) return 0;  /* 过期结果，不用 */
+    *out = g_result;
+    return out->found ? 1 : 0;
 }
