@@ -277,6 +277,8 @@ static DWORD StateColor(ImeState s) {
 /* ---------- 检测线程 ---------- */
 static DWORD WINAPI DetectorThread(LPVOID param) {
     (void)param;
+    if (GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))
+        SetThreadDescription(GetCurrentThread(), L"detector");
     int pollMs = g_cfg.pollMs, trackMs = g_cfg.trackMs;
     /* 中英模式查询（跨进程 SendMessage）仅在其结果会影响显示时才做：
        En 与 Cn 至少一个非 0 才查；两个都是 0（都不显示）时跳过，避免卡顿。 */
@@ -347,12 +349,15 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             lastPoll = now;
             ImeState prev = cur;
             int lang = ImeKeyboardLang();
-            /* 大写 / 英文键盘 / 日 / 韩 这四条路不查 IME，pr 标记为"本次没探" */
-            if (ImeIsCapsLock()) { cur = IMEST_CAPS; pr.ok = 0; pr.opened = -1; pr.conv = -1; }
-            else if (lang < 0)   { /* 没有前台窗口：沿用上次状态，别去查（会读到自己） */ }
-            else if (lang == 0x09) { cur = IMEST_KBD_EN; pr.ok = 0; pr.opened = -1; pr.conv = -1; }
-            else if (lang == 0x11) { cur = IMEST_JP;     pr.ok = 0; pr.opened = -1; pr.conv = -1; }
-            else if (lang == 0x12) { cur = IMEST_KR;     pr.ok = 0; pr.opened = -1; pr.conv = -1; }
+            /* 大写 / 英文键盘 / 日 / 韩 这四条路不查 IME，pr 标记为"本次没探"。
+               ★ settling 必须一并清零：这些状态由键盘布局直接决定，没有"未定期"。
+               不清的话 settling 残留 1 → 释放条件 !pr.settling 永假 → settleGate
+               永久闭合 → 圆点从此不再显示（切到这类布局的窗口就触发，重启才恢复）。 */
+            if (ImeIsCapsLock()) { cur = IMEST_CAPS; pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0; }
+            else if (lang < 0)   { /* 没有前台窗口：沿用上次状态，别去查（会读到自己） */ pr.settling = 0; }
+            else if (lang == 0x09) { cur = IMEST_KBD_EN; pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0; }
+            else if (lang == 0x11) { cur = IMEST_JP;     pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0; }
+            else if (lang == 0x12) { cur = IMEST_KR;     pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0; }
             else if (needMode) {
                 int cn = ImeIsChineseModeEx(&pr);
                 cur = cn ? IMEST_CN : IMEST_EN;
@@ -361,6 +366,7 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
                 pr.ok = 0;
                 pr.opened = -1;
                 pr.conv = -1;
+                pr.settling = 0;
             }
             if (cur != prev) {
                 stateChanged = 1;

@@ -340,68 +340,88 @@ done:
    检测线程拿到 ackSeq==自己的 reqSeq 才采纳结果；否则视为超时/过期，
    直接返回失败（沿用上一轮显示状态）。过期结果也不会被误用，因为序号对不上。
 
-   线程退出：stop=1 后 SetEvent(reqEv) 唤醒它，它看到就收工（最坏情况下它
-   正卡在一次跨进程调用里，WaitForSingleObject 给有限等待，超时就 detach
-   式放弃句柄 —— 进程马上要退，不值得为它无限等）。 */
+   ★ worker 卡死自愈：某些程序被挂起（SuspendThread/死锁）时，跨进程调用
+   **永不返回** —— worker 卡死一次，之后每轮查询都超时，圆点从此不再显示
+   （用户症状："怎么切换中英都不显示，重启才好"）。对策：连续超时
+   CARET_RESTART_AFTER 次就**换一代 worker**（新事件对 + 新线程 + 重新
+   CoCreateInstance）。旧线程若哪天苏醒，发现代际不符就自己退出（不用
+   TerminateThread —— 它持有 COM 状态，硬杀有死锁风险；泄漏一个挂死线程
+   和一对事件句柄，低频可接受）。每个 worker 用**自己捕获的**事件句柄，
+   避免重建后旧线程误等新事件。 */
 #define CARET_DEFAULT_TIMEOUT_MS 150
+#define CARET_RESTART_AFTER 20          /* 连续超时这么多次（约3秒）就重建 worker */
 
 static HANDLE          g_reqEv = NULL;    /* 检测线程 -> 查询线程：有新请求 */
 static HANDLE          g_ackEv = NULL;    /* 查询线程 -> 检测线程：结果就绪 */
 static HANDLE          g_workerTh = NULL;
 static volatile LONG   g_reqSeq = 0;
 static volatile LONG   g_ackSeq = 0;
-static volatile LONG   g_stop = 0;
-static volatile LONG   g_workerDone = 0;
+static volatile LONG   g_gen = 0;         /* worker 代际：重建 +1，旧代见之即退 */
 static int             g_timeoutMs = CARET_DEFAULT_TIMEOUT_MS;
 static CaretPos        g_result;          /* 仅查询线程写，靠序号/事件保证读时已写完 */
 
 static DWORD WINAPI CaretWorkerThread(LPVOID param) {
-    (void)param;
+    LONG mygen = (LONG)(INT_PTR)param;
+    HANDLE myReq = g_reqEv, myAck = g_ackEv;   /* 捕获本代的事件对（重建后全局会换新） */
+    /* 线程命名：调试器/诊断工具里区分 worker 用 */
+    if (GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))
+        SetThreadDescription(GetCurrentThread(), L"caret-worker");
     /* 查询线程自己初始化 COM（UIA 客户端必须 MTA）—— 不能沿用检测线程的
        apartment：CoInitializeEx 是按线程计的。 */
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) { InterlockedExchange(&g_workerDone, 1); return 0; }
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return 0;
 
     LONG served = 0;
     for (;;) {
-        DWORD w = WaitForSingleObject(g_reqEv, 1000);
-        if (InterlockedCompareExchange(&g_stop, 0, 0)) break;
+        DWORD w = WaitForSingleObject(myReq, 1000);
+        if (g_gen != mygen) break;                   /* 换代了：自行退出 */
         if (w != WAIT_OBJECT_0) continue;            /* 超时只是醒来看看 stop */
         LONG seq = InterlockedCompareExchange(&g_reqSeq, 0, 0);
         if (seq == served) continue;                 /* 已经答过这一步 */
         served = seq;
         CaretPos r;
         ZeroMemory(&r, sizeof(r));
-        CaretProbeOnce(&r);                          /* 可能阻塞数秒（就是它要被隔离） */
+        CaretProbeOnce(&r);                          /* 可能永久卡死（自愈机制兜底） */
         g_result = r;                                /* 先写数据，再放事件 */
         InterlockedExchange(&g_ackSeq, served);
-        SetEvent(g_ackEv);
+        SetEvent(myAck);
     }
     if (SUCCEEDED(hr)) CoUninitialize();
-    InterlockedExchange(&g_workerDone, 1);
+    CloseHandle(myReq);                              /* 本代的事件对只有自己在用 */
+    CloseHandle(myAck);
     return 0;
+}
+
+/* 事件对 + 线程 + 序列的整体（重）建。首次启动与卡死自愈共用。 */
+static int CaretSpawnWorker(void) {
+    HANDLE re = CreateEventW(NULL, FALSE, FALSE, NULL);   /* 自动重置：一次请求一次唤醒 */
+    HANDLE ae = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!re || !ae) { if (re) CloseHandle(re); if (ae) CloseHandle(ae); return 0; }
+    g_reqEv = re; g_ackEv = ae;
+    InterlockedExchange(&g_reqSeq, 0);
+    InterlockedExchange(&g_ackSeq, 0);
+    HANDLE th = CreateThread(NULL, 0, CaretWorkerThread,
+                             (LPVOID)(INT_PTR)g_gen, 0, NULL);
+    if (!th) return 0;
+    g_workerTh = th;
+    return 1;
 }
 
 void CaretWorkerStart(int timeoutMs) {
     if (g_workerTh) return;
     g_timeoutMs = (timeoutMs >= 20 && timeoutMs <= 5000) ? timeoutMs : CARET_DEFAULT_TIMEOUT_MS;
-    g_reqEv = CreateEventW(NULL, FALSE, FALSE, NULL);   /* 自动重置：一次请求一次唤醒 */
-    g_ackEv = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (!g_reqEv || !g_ackEv) return;
-    g_workerTh = CreateThread(NULL, 0, CaretWorkerThread, NULL, 0, NULL);
+    CaretSpawnWorker();
 }
 
 void CaretWorkerStop(void) {
     /* 在检测线程（已退出循环）里调，不涉及并发 */
     if (!g_workerTh) return;
-    InterlockedExchange(&g_stop, 1);
-    SetEvent(g_reqEv);
-    /* 正常情况下它立刻退出；万一正卡在一次跨进程调用里，给它一点时间就放手 ——
-       进程接着就结束了，为它无限等待不值得。 */
-    if (WaitForSingleObject(g_workerTh, 500) == WAIT_OBJECT_0) CloseHandle(g_workerTh);
+    InterlockedIncrement(&g_gen);            /* 旧线程最多 1 秒内自行退出 */
+    /* 旧线程可能正卡在一次跨进程调用里（无限期），句柄 detach 掉 ——
+       进程马上要结束了，为它无限等待不值得。 */
+    CloseHandle(g_workerTh);
     g_workerTh = NULL;
-    if (g_reqEv) { CloseHandle(g_reqEv); g_reqEv = NULL; }
-    if (g_ackEv) { CloseHandle(g_ackEv); g_ackEv = NULL; }
+    /* 事件对归 worker 所有（它退出时关），这里不重复关 */
 }
 
 /* 带超时的光标查询：把活儿交给查询线程，最多等 g_timeoutMs。
@@ -415,11 +435,31 @@ int CaretGetPosEx(CaretPos* out, int* timeoutOut) {
     out->source = CARET_NONE;
     out->x = out->y = out->h = 0;
     if (timeoutOut) *timeoutOut = 0;
-    if (!g_workerTh) return 0;                 /* 未启用超时机制：调用方自行处理 */
+    if (!g_workerTh) CaretSpawnWorker();       /* 上次重建失败：本轮再试 */
+    if (!g_workerTh) return 0;
+
+    static int consecTimeouts = 0;             /* 连续超时计数（检测线程独占，无需同步） */
 
     LONG seq = InterlockedIncrement(&g_reqSeq);
     SetEvent(g_reqEv);
     if (WaitForSingleObject(g_ackEv, (DWORD)g_timeoutMs) != WAIT_OBJECT_0) {
+        /* ★ 连续超时 = worker 很可能永久卡死在跨进程调用里：换代重建，
+           否则此后每轮都超时，圆点永远不再显示（重启才能恢复的那种症状）。 */
+        if (++consecTimeouts >= CARET_RESTART_AFTER) {
+            consecTimeouts = 0;
+            static ULONGLONG lastRe = 0;
+            ULONGLONG now = GetTickCount64();
+            if (!lastRe || now - lastRe >= 5000) {
+                lastRe = now;
+                DbgLog(L"caret: worker stuck (%d consecutive timeouts) -- respawning", CARET_RESTART_AFTER);
+            }
+            InterlockedIncrement(&g_gen);      /* 旧线程醒来见代际不符自行退出 */
+            if (g_workerTh) { CloseHandle(g_workerTh); g_workerTh = NULL; }  /* detach */
+            /* 旧 UIA 对象不 Release（旧 worker 可能还悬在它的调用上），直接弃用换新：
+               若卡死发生在本地代理锁上，复用旧对象会让新 worker 跟着卡。 */
+            g_uia = NULL;
+            CaretSpawnWorker();                /* 新事件对 + 新线程 + 新 COM 对象 */
+        }
         if (timeoutOut) *timeoutOut = 1;
         static ULONGLONG last = 0;
         ULONGLONG now = GetTickCount64();
@@ -429,6 +469,7 @@ int CaretGetPosEx(CaretPos* out, int* timeoutOut) {
         }
         return 0;
     }
+    consecTimeouts = 0;
     if (InterlockedCompareExchange(&g_ackSeq, 0, 0) != seq) return 0;  /* 过期结果，不用 */
     *out = g_result;
     return out->found ? 1 : 0;

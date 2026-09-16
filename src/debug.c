@@ -47,7 +47,9 @@ static void DebugOpen(void) {
                  L"%s\\IMEIndicator-%04u%02u%02u-%02u%02u%02u.log",
                  base, st.wYear, st.wMonth, st.wDay,
                  st.wHour, st.wMinute, st.wSecond);
-    _wfopen_s(&g_fp, path, L"w, ccs=UTF-8");
+    /* _SH_DENYNO：允许别的程序边跑边读（tail / 复制）。用 fopen 独占打开的话
+       程序运行期间日志文件无法被任何工具读取（实测 cp/grep/Python 全部被拒）。 */
+    g_fp = _wfsopen(path, L"w, ccs=UTF-8", _SH_DENYNO);
 }
 
 /* 关闭日志文件（下次 DbgLog 若仍在开启会重开） */
