@@ -20,6 +20,29 @@ static void EnsureUia(void) {
     if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE)
         CoCreateInstance(CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
                          IID_PPV_ARGS(&g_uia));
+    if (!g_uia) {
+        /* 创建失败必须留痕：否则"UIA 全通道静默失败 → 永远 miss"无从查起 */
+        static ULONGLONG last = 0;
+        ULONGLONG now = GetTickCount64();
+        if (!last || now - last >= 5000) {
+            last = now;
+            DbgLog(L"uia: CoCreateInstance failed hr=0x%08lX (UIA unavailable)", (unsigned long)hr);
+        }
+    }
+}
+
+/* 通道失败原因日志：1 秒节流（"没有光标"是常态，不能刷屏）。
+   之前 UIA/MSAA 失败全部静默 → 用户日志里只见 caret=miss src=none，
+   看不出是哪条路、为什么死。 */
+static void LogChFail(const WCHAR* ch, const WCHAR* why, HRESULT hr) {
+    static ULONGLONG last = 0;
+    static WCHAR lastWhy[128] = L"";
+    ULONGLONG now = GetTickCount64();
+    if (last && now - last < 1000) return;
+    if (lastWhy[0] && wcscmp(lastWhy, why) == 0 && now - last < 5000) return;
+    last = now;
+    lstrcpynW(lastWhy, why, 128);
+    DbgLog(L"ch fail: %s %s (hr=0x%08lX)", ch, why, (unsigned long)hr);
 }
 
 /* 文本范围的边界矩形 -> CaretPos（BoundingRectangles 是 double SAFEARRAY，
@@ -104,15 +127,21 @@ static int ViaMsaa(CaretPos* out) {
     HWND hwnd = ImeFocusedWindow();
     if (!hwnd) return 0;
     IAccessible* acc = NULL;
-    if (FAILED(AccessibleObjectFromWindow(hwnd, (DWORD)(LONG)OBJID_CARET, IID_IAccessible, (void**)&acc)) || !acc)
+    HRESULT hr = AccessibleObjectFromWindow(hwnd, (DWORD)(LONG)OBJID_CARET, IID_IAccessible, (void**)&acc);
+    if (FAILED(hr) || !acc) {
+        LogChFail(L"msaa", L"AccessibleObjectFromWindow failed", hr);
         return 0;
+    }
     long x = 0, y = 0, w = 0, h = 0;
     VARIANT child;
     child.vt = VT_I4;
     child.lVal = 0;                     /* CHILDID_SELF */
-    HRESULT hr = acc->accLocation(&x, &y, &w, &h, child);
+    hr = acc->accLocation(&x, &y, &w, &h, child);
     acc->Release();
-    if (FAILED(hr)) return 0;
+    if (FAILED(hr)) {
+        LogChFail(L"msaa", L"accLocation failed", hr);
+        return 0;
+    }
     out->x = (int)x; out->y = (int)y; out->h = (int)h;
     return 1;   /* 合理性由 CaretGetPos 的 TRY_CHANNEL 统一过滤（这样 reject 日志才打得出） */
 }
@@ -158,7 +187,19 @@ static IUIAutomationElement* UiaFindPattern(IUIAutomationElement* start, BOOL wa
 static int ViaUiaCaretRange(CaretPos* out) {
     if (!g_uia) return 0;
     IUIAutomationElement* focus = NULL;
-    if (FAILED(g_uia->GetFocusedElement(&focus)) || !focus) return 0;
+    HRESULT hr = g_uia->GetFocusedElement(&focus);
+    if (FAILED(hr) || !focus) {
+        /* 兜底：按焦点窗口句柄取元素。GetFocusedElement 依赖对端 UIA provider
+           的焦点上报，某些应用（权限差异/沙箱/provider 忙）会拿不到焦点元素，
+           但窗口句柄仍然有效 —— Chromium 系应用常见。 */
+        HWND fw = ImeFocusedWindow();
+        if (fw && SUCCEEDED(g_uia->ElementFromHandle(fw, &focus)) && focus) {
+            LogChFail(L"uia_caret", L"GetFocusedElement failed -> fallback hwnd", hr);
+        } else {
+            LogChFail(L"uia_caret", L"GetFocusedElement & hwnd both failed", hr);
+            return 0;
+        }
+    }
     IUIAutomationElement* el = UiaFindPattern(focus, TRUE);
     focus->Release();
     if (!el) return 0;
@@ -194,7 +235,15 @@ static int ViaUiaCaretRange(CaretPos* out) {
 static int ViaUiaSelection(CaretPos* out) {
     if (!g_uia) return 0;
     IUIAutomationElement* focus = NULL;
-    if (FAILED(g_uia->GetFocusedElement(&focus)) || !focus) return 0;
+    HRESULT hr = g_uia->GetFocusedElement(&focus);
+    if (FAILED(hr) || !focus) {
+        HWND fw = ImeFocusedWindow();
+        if (fw && SUCCEEDED(g_uia->ElementFromHandle(fw, &focus)) && focus) {
+            LogChFail(L"uia_sel", L"GetFocusedElement failed -> fallback hwnd", hr);
+        } else {
+            return 0;   /* uia_caret 通道已记过失败原因，不再重复刷 */
+        }
+    }
     IUIAutomationElement* el = UiaFindPattern(focus, FALSE);
     focus->Release();
     if (!el) return 0;
