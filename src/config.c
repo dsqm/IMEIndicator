@@ -20,6 +20,8 @@ static int   g_ignoreCount = 0;
 
 /* ---------- 小工具 ---------- */
 
+#define ISAME(s,w) (_stricmp(s,w)==0)
+
 static void TrimW(WCHAR* s) {
     size_t l = wcslen(s);
     while (l > 0 && (s[l-1]==L' '||s[l-1]==L'\t'||s[l-1]==L'\r')) s[--l]=0;
@@ -75,6 +77,17 @@ static DWORD ParseColor6(const char* v, DWORD defRgb) {
            ((DWORD)HexV(v[4])<<4)|(DWORD)HexV(v[5]);
 }
 
+/* 形状按单词写（circle / triangle），不认数字：读 ini 的人一眼能看出改成什么。
+   非法值回落默认圆，跟其它配置项的"解析失败即默认"一致。 */
+static int ParseShapeA(const char* v, int def) {
+    if (!v) return def;
+    while (*v==' '||*v=='\t') v++;
+    if (ISAME(v,"circle") || ISAME(v,"c")) return SHAPE_CIRCLE;
+    /* 词尾允许跟注释/空白：只比前缀 */
+    if (!_strnicmp(v,"triangle",8) || !_strnicmp(v,"tri",3)) return SHAPE_TRIANGLE;
+    return def;
+}
+
 /* ---------- 默认值 ---------- */
 #define DEF_EN_RGB   0xFF0000  /* 红                                     */
 #define DEF_CAPS_RGB 0x0080FF  /* 蓝                                     */
@@ -91,7 +104,6 @@ static void SrcOfPath(WCHAR* out, size_t cap) {
     _snwprintf_s(out, cap, _TRUNCATE, L"%s\\IMEIndicator.ini", exe);
 }
 
-#define ISAME(s,w) (_stricmp(s,w)==0)
 
 /* 配置文件完整路径（托盘「打开配置」用） */
 void CfgPath(WCHAR* out, size_t cap) { SrcOfPath(out, cap); }
@@ -106,6 +118,7 @@ void CfgLoad(ImeCfg* c) {
     c->imeStrategy=0;
     c->hideFullscreen=1;
     c->caretTimeoutMs=150;
+    c->shape=SHAPE_CIRCLE;
 
     FILE* f=NULL;
     if (_wfopen_s(&f, path, L"rb")!=0 || !f) {
@@ -142,6 +155,9 @@ void CfgLoad(ImeCfg* c) {
             ";\n"
             "[Overlay]\n"
             "Size    = 9      ; 圆点直径（像素）\n"
+            "; 形状：circle=圆（默认） triangle=三角形（等边，尖角朝上）\n"
+            "; 两者尺寸都按同一个 Size 算，换形状不用重新调大小。\n"
+            "Shape   = circle\n"
             "OffsetX = 2      ; 相对光标左缘的水平偏移（+ 右）\n"
             "OffsetY = 4      ; 相对光标底缘的垂直偏移（+ 下）\n"
             ";\n"
@@ -227,7 +243,8 @@ void CfgLoad(ImeCfg* c) {
                                     char kb[CFG_NAME_MAX*4], vb[512];
                                     WideCharToMultiByte(CP_UTF8,0,k,-1,kb,(int)sizeof(kb),0,0);
                                     WideCharToMultiByte(CP_UTF8,0,v,-1,vb,(int)sizeof(vb),0,0);
-                                    if (ISAME(kb,"size"))    c->size=ParseIntA(vb,8,1,64);
+                                    if (ISAME(kb,"size"))    c->size=ParseIntA(vb,9,1,64);
+                                    else if (ISAME(kb,"shape")) c->shape=ParseShapeA(vb,SHAPE_CIRCLE);
                                     else if (ISAME(kb,"offsetx")) c->offsetX=ParseIntA(vb,2,-512,512);
                                     else if (ISAME(kb,"offsety")) c->offsetY=ParseIntA(vb,4,-512,512);
                                 } else if (sec==3 && !eq) {

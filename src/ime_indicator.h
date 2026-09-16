@@ -24,6 +24,11 @@
    否则想设成黑色就只能关掉该状态。 */
 #define IME_COLOR_NONE 0xFFFFFFFFu
 
+/* 圆点形状（配置 Shape）：两者都是"尖角朝上"的对称形状，尺寸含义一致
+   —— Size 都是外接方形边长，所以换形状不用重新调大小。 */
+#define SHAPE_CIRCLE   0   /* 实心圆（默认） */
+#define SHAPE_TRIANGLE 1   /* 等边三角形，尖角朝上 */
+
 typedef struct {
     DWORD        cnrgb;   /* 中文输入（默认不显示；设颜色则中文态显示）        */
     DWORD        enrgb;   /* 英文（默认红色）                                  */
@@ -33,6 +38,7 @@ typedef struct {
     DWORD        krrgb;   /* 韩文输入法（默认黑色）                            */
     DWORD        dotAlpha;/* 0..255：圆点不透明度                                */
     int          size;    /* 圆点直径（像素）                                    */
+    int          shape;    /* SHAPE_CIRCLE / SHAPE_TRIANGLE                      */
     int          offsetX; /* 相对光标左缘的水平偏移（+ 右）                       */
     int          offsetY; /* 相对光标底缘的垂直偏移（+ 下）                       */
     int          pollMs;  /* 状态检测间隔                                        */
@@ -126,7 +132,6 @@ void   OverlayShutdown(void);       /* 销毁窗口                             
 void   OverlaySetVisible(int visible);
 void   OverlaySetColor(DWORD rgb, DWORD alpha);
 void   OverlayMove(int screenX, int baselineY); /* 移窗 + 重绘 */
-
 /* ---- main.c ---- */
 extern ImeCfg g_cfg;
 extern volatile LONG g_showDot;   /* 由检测线程写，主线程只读 */

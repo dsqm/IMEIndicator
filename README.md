@@ -55,6 +55,8 @@ build.bat
 
 - `HideWhenFullscreen = 1` —— 前景窗口全屏时不显示圆点（看视频/演示不遮挡）
 - `CaretTimeoutMs = 150` —— 单次光标查询最长等待（毫秒），见下
+- `Shape = circle` —— 圆点形状：`circle`（圆，默认）或 `triangle`（等边三角形，尖角朝上）。
+  两种形状按同一个 `Size` 计算大小，换形状不用重新调尺寸
 
 ### 光标查询的超时保护
 

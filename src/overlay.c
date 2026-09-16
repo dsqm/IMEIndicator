@@ -11,6 +11,7 @@
 
 static HWND    g_hwnd = NULL;
 static int     g_dotSize = 9, g_offX = 2, g_offY = 4;
+static int     g_shape = SHAPE_CIRCLE;  /* SHAPE_CIRCLE / SHAPE_TRIANGLE */
 static BYTE    g_cr = 0xFF, g_cg = 0x00, g_cb = 0x00; /* 当前颜色分量（默认英文红） */
 static BYTE    g_alpha = 255;
 
@@ -31,6 +32,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 void OverlayInit(ImeCfg* c) {
     g_dotSize = c->size; g_offX = c->offsetX; g_offY = c->offsetY;
+    g_shape = (c->shape == SHAPE_TRIANGLE) ? SHAPE_TRIANGLE : SHAPE_CIRCLE;
     g_alpha = (BYTE)c->dotAlpha;
 
     HINSTANCE hi = GetModuleHandleW(NULL);
@@ -112,7 +114,38 @@ static int EnsureSurface(void) {
     return 1;
 }
 
-/* 4x4 子采样抗锯齿画圆，写进缓存的 DIB */
+/* 4x4 子采样抗锯齿画形状，写进缓存的 DIB。
+   形状只影响"这个采样点算不算在图形内"，外围（DIB 缓存、预乘、
+   位置未变跳过重绘）与形状无关 —— 加形状不用动那些。 */
+
+/* 圆形：fx,fy 是相对图形中心的偏移，half 是内切半径 */
+static int InsideCircle(double fx, double fy, double half) {
+    return (fx * fx + fy * fy) <= half * half;
+}
+
+/* 等边三角形，尖角朝上。尺寸取"让三角形高度等于圆的直径"（= 2*half）：
+   直接拿圆的 half 当外接半高会让三角形显得比圆小一圈（面积只有圆的 ~27%），
+   按高度撑满后是 ~49%，两者摆一起才像同一套东西。
+   平移量把包围盒居中 —— 等边三角形的重心不在外接圆心，不平移会整体偏上半个身位。
+   判定用"点与三条有向边同侧"（叉积同号），比逐个三角形求交简单。 */
+static int InsideTriangle(double fx, double fy, double half) {
+    /* 半高 H 使三角形高 = 2*half → H = 2*half/1.5 = half*4/3 */
+    const double H  = half * 1.3333333333;
+    const double w  = H * 0.5773502692;   /* 半宽 = 半高 * √3/3 */
+    /* 顶点（以画布中心的未平移坐标系）：上 (0,-H)、左下 (-w, H*0.5)、右下 (w, H*0.5)
+       包围盒 y ∈ [-H, H*0.5]，中心在 -H*0.25 → 下移 H*0.25 使其在画布里居中 */
+    const double dy = H * 0.25;
+    const double ax = 0.0, ay = -H + dy;
+    const double bx = -w,  by = H * 0.5 + dy;
+    const double cx2 = w,  cy2 = H * 0.5 + dy;
+    double d1 = (bx - ax) * (fy - ay) - (by - ay) * (fx - ax);
+    double d2 = (cx2 - bx) * (fy - by) - (cy2 - by) * (fx - bx);
+    double d3 = (ax - cx2) * (fy - cy2) - (ay - cy2) * (fx - cx2);
+    int neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+    int pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+    return !(neg && pos);                  /* 三个叉积同号（含 0）= 在内部 */
+}
+
 static void PaintDot(void) {
     int sz = g_bmpSize;
     /* 预乘：UpdateLayeredWindow + AC_SRC_ALPHA 需要预乘 alpha */
@@ -121,7 +154,7 @@ static void PaintDot(void) {
     int pb = (g_cb * g_alpha + 127) / 255;
 
     double cx = (sz - 1) / 2.0, cy = (sz - 1) / 2.0;
-    double r = (sz / 2.0) - 0.5;         /* 圆心到边的内切半径，留 1px 抗锯齿 */
+    double r = (sz / 2.0) - 0.5;         /* 图形中心到边的内切半径，留 1px 抗锯齿 */
     const int SS = 4;                     /* 4x4 子采样抗锯齿 */
     BYTE* p = (BYTE*)g_bits;
     for (int y = 0; y < sz; y++) {
@@ -131,7 +164,9 @@ static void PaintDot(void) {
                 for (int sxx = 0; sxx < SS; sxx++) {
                     double fx = x + (sxx + 0.5) / SS - cx;
                     double fy = y + (syy + 0.5) / SS - cy;
-                    if (fx * fx + fy * fy <= r * r) inside++;
+                    if (g_shape == SHAPE_TRIANGLE) {
+                        if (InsideTriangle(fx, fy, r)) inside++;
+                    } else if (InsideCircle(fx, fy, r)) inside++;
                 }
             int a = (g_alpha * inside + (SS * SS - 1)) / (SS * SS);
             p[0] = (BYTE)((pb * a + 127) / 255);   /* B 预乘 */
