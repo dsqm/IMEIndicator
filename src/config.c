@@ -22,6 +22,138 @@ static int   g_ignoreCount = 0;
 
 #define ISAME(s,w) (_stricmp(s,w)==0)
 
+/* ---------- 已有配置文件补写新参数 ----------
+   程序升级后模板里新增的键，用户手上的旧 ini 里没有 —— 光靠默认值，用户想改
+   却找不到那一行。这里把缺的键（连注释）补插到对应段标题行之后。
+   按字节处理：文件是 UTF-8（可能带 BOM），模板行以 \n 收尾；插入文本的行尾
+   跟随文件现有风格（检测首行用的是 \r\n 还是 \n）。 */
+typedef struct {
+    const char* key;      /* 检测这个键名是否已存在（裸 ASCII 子串即可） */
+    const char* section;  /* 插到这个段标题行之后，如 "[General]" */
+    const char* block;    /* 要插入的文本（\n 行尾，写入时统一转换） */
+} CfgUpgrade;
+
+static const CfgUpgrade kUpgrades[] = {
+    { "ImeStrategy",
+      "[General]",
+      "; 中英判定策略：0=自动学习(推荐) 1=只看 IME open 状态 2=只看转换模式\n"
+      "; 自动学习会观察切换时哪个信号在变；个别输入法识别不准时可手动指定。\n"
+      "ImeStrategy = 0\n"
+      ";\n" },
+    { "HideWhenFullscreen",
+      "[General]",
+      "; 前景窗口处于全屏时（看视频/演示）隐藏圆点：全屏下光标检测会拿到上一次\n"
+      "; 的陈旧坐标，圆点会一直钉在画面上挡视线。\n"
+      "HideWhenFullscreen = 1\n"
+      ";\n" },
+    { "CaretTimeoutMs",
+      "[General]",
+      "; 单次光标查询最长等待(ms)：光标检测要跨进程问 UIA/MSAA，对方程序卡住时\n"
+      "; 会一直不返回。超时即放弃本轮查询（沿用上一轮显示），不冻结检测线程。\n"
+      "CaretTimeoutMs = 150\n"
+      ";\n" },
+    { "Shape",
+      "[Overlay]",
+      "; 形状：circle=圆（默认） triangle=三角形（等边，尖角朝上）\n"
+      "; 两者尺寸都按同一个 Size 算，换形状不用重新调大小。\n"
+      "Shape = circle\n" },
+};
+
+/* buf 里找裸键名（行首可有空白，键名后跟空白或'='，避免撞上别的单词） */
+static int HasKey(const char* buf, size_t n, const char* key) {
+    size_t kl = strlen(key);
+    for (size_t i = 0; i + kl <= n; i++) {
+        if (memcmp(buf + i, key, kl) != 0) continue;
+        char prev = (i == 0) ? '\n' : buf[i-1];
+        char next = (i + kl < n) ? buf[i+kl] : '\n';
+        int prevOk = (prev == '\n' || prev == '\r' || prev == ' ' || prev == '\t');
+        int nextOk = (next == '=' || next == ' ' || next == '\t' || next == '\r' || next == '\n');
+        if (prevOk && nextOk) return 1;
+    }
+    return 0;
+}
+
+/* 找段标题行（如 "[General]"）行尾之后的位置；找不到返回 (size_t)-1 */
+static size_t FindSectionEnd(const char* buf, size_t n, const char* section) {
+    size_t sl = strlen(section);
+    for (size_t i = 0; i + sl <= n; i++) {
+        if (memcmp(buf + i, section, sl) != 0) continue;
+        /* 必须顶格（行首），且后面紧跟 ] 或空白 —— 精确匹配段标题 */
+        char prev = (i == 0) ? '\n' : buf[i-1];
+        char next = (i + sl < n) ? buf[i+sl] : '\n';
+        if (prev != '\n' && prev != '\r') continue;
+        if (next != '\n' && next != '\r') continue;
+        /* 返回该行的行尾之后 */
+        size_t j = i + sl;
+        while (j < n && buf[j] != '\n') j++;
+        return (j < n) ? j + 1 : j;
+    }
+    return (size_t)-1;
+}
+
+/* 读入 path，把缺失的键补写进去（有缺才写文件）。返回 1=文件被更新。 */
+static int UpgradeIniFile(const WCHAR* path) {
+    FILE* f = NULL;
+    if (_wfopen_s(&f, path, L"rb") != 0 || !f) return 0;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 256 * 1024) { fclose(f); return 0; }
+    char* buf = (char*)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return 0; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = 0;
+
+    /* 行尾风格：文件里出现 \r\n 就用 \r\n，否则 \n（模板本身是 \n） */
+    int crlf = 0;
+    for (size_t i = 0; i + 1 < rd; i++)
+        if (buf[i] == '\r' && buf[i+1] == '\n') { crlf = 1; break; }
+
+    /* 逐个补缺失键：每次插入都重新在最新 buf 上找段位置，块最多 4 个，开销无所谓 */
+    int changed = 0;
+    for (size_t u = 0; u < sizeof(kUpgrades)/sizeof(kUpgrades[0]); u++) {
+        const CfgUpgrade* up = &kUpgrades[u];
+        if (HasKey(buf, rd, up->key)) continue;
+        size_t at = FindSectionEnd(buf, rd, up->section);
+        if (at == (size_t)-1) continue;
+        /* 展开插入文本的行尾 */
+        size_t bl = strlen(up->block);
+        char* ins = (char*)malloc(bl * 2 + 1);
+        if (!ins) continue;
+        size_t k = 0;
+        for (size_t m = 0; m < bl; m++) {
+            if (up->block[m] == '\n' && !(k > 0 && ins[k-1] == '\r')) {
+                if (crlf) ins[k++] = '\r';
+            }
+            ins[k++] = up->block[m];
+        }
+        char* nb = (char*)malloc(rd + k + 1);
+        if (!nb) { free(ins); continue; }
+        memcpy(nb, buf, at);
+        memcpy(nb + at, ins, k);
+        memcpy(nb + at + k, buf + at, rd - at);
+        free(ins);
+        free(buf);
+        buf = nb;
+        rd += k;
+        buf[rd] = 0;
+        changed = 1;
+    }
+
+    if (changed) {
+        FILE* w = NULL;
+        if (_wfopen_s(&w, path, L"wb") == 0 && w) {
+            fwrite(buf, 1, rd, w);
+            fclose(w);
+        } else {
+            changed = 0;   /* 写不回去别报成功 */
+        }
+    }
+    free(buf);
+    return changed;
+}
+
 static void TrimW(WCHAR* s) {
     size_t l = wcslen(s);
     while (l > 0 && (s[l-1]==L' '||s[l-1]==L'\t'||s[l-1]==L'\r')) s[--l]=0;
@@ -119,6 +251,9 @@ void CfgLoad(ImeCfg* c) {
     c->hideFullscreen=1;
     c->caretTimeoutMs=150;
     c->shape=SHAPE_CIRCLE;
+
+    /* 旧配置文件里缺新参数时先补写（本次启动就能读到新键） */
+    UpgradeIniFile(path);
 
     FILE* f=NULL;
     if (_wfopen_s(&f, path, L"rb")!=0 || !f) {

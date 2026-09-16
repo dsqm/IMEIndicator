@@ -123,21 +123,22 @@ static int InsideCircle(double fx, double fy, double half) {
     return (fx * fx + fy * fy) <= half * half;
 }
 
-/* 等边三角形，尖角朝上。尺寸取"让三角形高度等于圆的直径"（= 2*half）：
-   直接拿圆的 half 当外接半高会让三角形显得比圆小一圈（面积只有圆的 ~27%），
-   按高度撑满后是 ~49%，两者摆一起才像同一套东西。
-   平移量把包围盒居中 —— 等边三角形的重心不在外接圆心，不平移会整体偏上半个身位。
-   判定用"点与三条有向边同侧"（叉积同号），比逐个三角形求交简单。 */
+/* 等边三角形，尖角朝上。尺寸取「宽 = 圆的直径」：等边三角形的高只有宽的
+   √3/2 ≈ 0.866（这是它本来的比例，宽>高才对——之前把半宽公式用错，
+   高比宽大 30%，看着又瘦又高）。与圆同宽则视觉等大，高略矮是正常形。
+   光学修正：三角形的视觉重心偏底边（底边重、尖角轻），按几何中心摆会显得
+   整体偏下，所以整体向上移 5% 高度（设计圈惯用做法，Play 按钮同款问题）。
+   判定用"点与三条有向边同侧"（叉积同号）。 */
 static int InsideTriangle(double fx, double fy, double half) {
-    /* 半高 H 使三角形高 = 2*half → H = 2*half/1.5 = half*4/3 */
-    const double H  = half * 1.3333333333;
-    const double w  = H * 0.5773502692;   /* 半宽 = 半高 * √3/3 */
-    /* 顶点（以画布中心的未平移坐标系）：上 (0,-H)、左下 (-w, H*0.5)、右下 (w, H*0.5)
-       包围盒 y ∈ [-H, H*0.5]，中心在 -H*0.25 → 下移 H*0.25 使其在画布里居中 */
-    const double dy = H * 0.25;
-    const double ax = 0.0, ay = -H + dy;
-    const double bx = -w,  by = H * 0.5 + dy;
-    const double cx2 = w,  cy2 = H * 0.5 + dy;
+    const double W  = half * 2.0;            /* 全宽 = 圆直径 */
+    const double Ht = W * 0.8660254038;      /* 全高 = 宽×√3/2（等边） */
+    const double dy = -Ht * 0.05;            /* 光学：向上微移 5% */
+    const double hw = W * 0.5;               /* 半宽 */
+    const double hh = Ht * 0.5;              /* 半高 */
+    /* 顶点（相对画布中心）：尖 (0,-hh+dy)、左下 (-hw,hh+dy)、右下 (hw,hh+dy) */
+    const double ax = 0.0, ay = -hh + dy;
+    const double bx = -hw, by = hh + dy;
+    const double cx2 = hw, cy2 = hh + dy;
     double d1 = (bx - ax) * (fy - ay) - (by - ay) * (fx - ax);
     double d2 = (cx2 - bx) * (fy - by) - (cy2 - by) * (fx - bx);
     double d3 = (ax - cx2) * (fy - cy2) - (ay - cy2) * (fx - cx2);
