@@ -38,6 +38,7 @@ typedef struct {
     int          pollMs;  /* 状态检测间隔                                        */
     int          trackMs; /* 光标追踪间隔                                        */
     int          imeStrategy; /* 中英判定策略：0=自动学习 1=open状态 2=转换模式    */
+    int          hideFullscreen; /* 1=前景窗口全屏时不显示圆点（看视频不遮挡）    */
 } ImeCfg;
 
 /* 状态判定结果 */
@@ -98,6 +99,7 @@ typedef enum {
 } CaretSource;
 typedef struct { int x, y, h; int found; CaretSource source; } CaretPos;
 int    CaretGetPos(CaretPos* out);   /* 0=失败 1=成功，坐标=屏幕物理像素 */
+int    CaretIsForegroundFullscreen(void); /* 前景窗口是否全屏（日志诊断用） */
 
 /* ---- overlay.c ---- */
 void   OverlayInit(ImeCfg* c);      /* 创建透明悬浮窗（需在含消息循环的线程）*/

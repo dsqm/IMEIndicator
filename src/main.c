@@ -373,10 +373,11 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             }
             if (stateChanged || fgChanged || now - lastLog >= 500) {
                 lastLog = now;
-                DbgLog(L"state=%s want=%d caret=%s(%d,%d,h=%d) src=%s | "
+                DbgLog(L"state=%s want=%d caret=%s(%d,%d,h=%d) src=%s fs=%d | "
                        L"opened=%d conv=0x%X ok=%d strat=%d nb=%d | %s",
                        StateName(cur), want, got ? L"hit" : L"miss",
                        cp.x, cp.y, cp.h, SrcName(cp.source),
+                       CaretIsForegroundFullscreen(),
                        pr.opened, (DWORD)pr.conv, pr.ok, pr.strategy, pr.nonBinary,
                        fg);
             }

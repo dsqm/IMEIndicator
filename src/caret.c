@@ -70,12 +70,38 @@ static int ViaGuiInfo(CaretPos* out) {
 /* 前置声明：ViaMsaa 在 CaretPlausible 定义之前用到它 */
 static int CaretPlausible(const CaretPos* cp);
 
+/* ★ 全屏判定（判定方式取自 InputTip `utils.ahk:isFullscreen`）：
+   无标题栏 + 窗口尺寸 >= 所在显示器的 98%。
+   为什么要它：全屏看视频时，MSAA 的 OBJID_CARET 仍会报出**上一次出现过的
+   光标位置**（日志里表现为坐标十几秒一动不动），圆点就钉在画面上挡视线。
+   本进程是 Per-Monitor V2，GetWindowRect 与 MONITORINFO 同为物理像素，可直接比。 */
+int CaretIsForegroundFullscreen(void) {
+    HWND fg = GetForegroundWindow();
+    if (!fg) return 0;
+    if (GetWindowLongW(fg, GWL_STYLE) & WS_CAPTION) return 0;
+    RECT wr;
+    if (!GetWindowRect(fg, &wr)) return 0;
+    int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
+    if (ww <= 0 || wh <= 0) return 0;
+    HMONITOR hm = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    if (!hm) return 0;
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(hm, &mi)) return 0;
+    int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+    int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    return (ww * 100 >= mw * 98 && wh * 100 >= mh * 98) ? 1 : 0;
+}
+
 /* 方法2：MSAA OBJID_CARET accLocation。
    InputTip 依赖它得到「真实光标」，对 Chromium 等效果比 GetSelection 可靠。
+   注意用的是**焦点控件**而不是前台窗口（InputTip 同款）：OBJID_CARET 属于
+   焦点控件所在的线程，拿顶层窗口会读到过期/别人的 caret。
    返回的是绝对屏幕坐标（accLocation 约定）；部分控件给 (0,0) 假数据，
    交给合理性过滤丢弃。 */
 static int ViaMsaa(CaretPos* out) {
-    HWND hwnd = GetForegroundWindow();
+    HWND hwnd = ImeFocusedWindow();
     if (!hwnd) return 0;
     IAccessible* acc = NULL;
     if (FAILED(AccessibleObjectFromWindow(hwnd, (DWORD)(LONG)OBJID_CARET, IID_IAccessible, (void**)&acc)) || !acc)
@@ -144,9 +170,16 @@ static int ViaUiaCaretRange(CaretPos* out) {
             BOOL active = FALSE;
             IUIAutomationTextRange* range = NULL;
             if (SUCCEEDED(tp2->GetCaretRange(&active, &range)) && range) {
-                ok = UiRect(out, range);
-                if (!ok && SUCCEEDED(range->ExpandToEnclosingUnit(TextUnit_Character)))
+                /* ★ isActive 就是"当前到底有没有活动光标"。为 FALSE 时不能
+                   再往下走 MSAA —— 那会拿回一个过期的坐标把点钉在屏幕上。
+                   取到文本模式却说没活动光标，就是明确的"没有光标"。 */
+                if (active) {
                     ok = UiRect(out, range);
+                    if (!ok && SUCCEEDED(range->ExpandToEnclosingUnit(TextUnit_Character)))
+                        ok = UiRect(out, range);
+                } else {
+                    ok = -1;   /* 明确无光标 */
+                }
                 range->Release();
             }
             tp2->Release();
@@ -245,9 +278,26 @@ static const WCHAR* CaretSrcName(CaretSource s) {
     }
 }
 
+/* 追踪循环每 15ms 跑一次，"没有光标"是常态 → 这类日志必须节流，否则刷屏 */
+static void LogNoCaret(const WCHAR* why) {
+    static ULONGLONG last = 0;
+    static WCHAR lastWhy[64] = L"";
+    ULONGLONG now = GetTickCount64();
+    if (last && now - last < 1000 && wcscmp(lastWhy, why) == 0) return;
+    last = now;
+    lstrcpynW(lastWhy, why, 64);
+    DbgLog(L"no caret: %s", why);
+}
+
+/* 返回 1=拿到坐标，-1=该通道明确报告"当前没有光标"（不再试后面的通道） */
 #define TRY_CHANNEL(detector, src)                                            \
     do {                                                                      \
-        if (detector(out)) {                                                  \
+        int r = (detector)(out);                                              \
+        if (r < 0) {                                                          \
+            LogNoCaret(L"uia_caret reports inactive");                        \
+            goto done;                                                        \
+        }                                                                     \
+        if (r > 0) {                                                          \
             if (CaretPlausible(out)) { out->source = (src); goto done; }      \
             DbgLog(L"reject %s caret=(%d,%d,h=%d)", CaretSrcName(src),        \
                    out->x, out->y, out->h);                                   \
@@ -258,9 +308,17 @@ int CaretGetPos(CaretPos* out) {
     EnsureUia();
     out->found = 0;
     out->source = CARET_NONE;
+    /* 全屏（看视频/演示）时一律不显示：此时 MSAA 会报出上一次的陈旧光标位置，
+       圆点会钉在画面上挡视线。 */
+    if (g_cfg.hideFullscreen && CaretIsForegroundFullscreen()) {
+        LogNoCaret(L"fullscreen foreground");
+        goto done;
+    }
+    /* UIA caret 排在 MSAA 之前：它带 isActive，能明确区分"有光标"和
+       "只有个过期坐标"；MSAA 拿这个信息，所以只能当兜底。 */
     TRY_CHANNEL(ViaGuiInfo, CARET_GUIINFO);
-    TRY_CHANNEL(ViaMsaa, CARET_MSAA);
     TRY_CHANNEL(ViaUiaCaretRange, CARET_UIA_CARET);
+    TRY_CHANNEL(ViaMsaa, CARET_MSAA);
     TRY_CHANNEL(ViaUiaSelection, CARET_UIA_SEL);
     TRY_CHANNEL(ViaIme, CARET_IME);
 done:

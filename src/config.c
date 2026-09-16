@@ -104,6 +104,7 @@ void CfgLoad(ImeCfg* c) {
     DWORD cn=IME_COLOR_NONE;   /* Cn 默认不显示：中文态无圆点 */
     c->size=9; c->offsetX=2; c->offsetY=4; c->pollMs=100; c->trackMs=15;
     c->imeStrategy=0;
+    c->hideFullscreen=1;
 
     FILE* f=NULL;
     if (_wfopen_s(&f, path, L"rb")!=0 || !f) {
@@ -118,6 +119,10 @@ void CfgLoad(ImeCfg* c) {
             "; 中英判定策略：0=自动学习(推荐) 1=只看 IME open 状态 2=只看转换模式\n"
             "; 自动学习会观察切换时哪个信号在变；个别输入法识别不准时可手动指定。\n"
             "ImeStrategy = 0\n"
+            ";\n"
+            "; 前景窗口处于全屏时（看视频/演示）隐藏圆点：全屏下光标检测会拿到上一次\n"
+            "; 的陈旧坐标，圆点会一直钉在画面上挡视线。\n"
+            "HideWhenFullscreen = 1\n"
             ";\n"
             "[Colors]\n"
             "; 颜色格式固定 #RRGGBB（6 位十六进制，必须带 #）；透明度一律用下面的 Alpha\n"
@@ -190,6 +195,7 @@ void CfgLoad(ImeCfg* c) {
                                     if (ISAME(kb,"pollintervalms"))   c->pollMs=ParseIntA(vb,100,5,60000);
                                     else if (ISAME(kb,"trackintervalms")) c->trackMs=ParseIntA(vb,15,5,200);
                                     else if (ISAME(kb,"imestrategy")) c->imeStrategy=ParseIntA(vb,0,0,2);
+                                    else if (ISAME(kb,"hidewhenfullscreen")) c->hideFullscreen=ParseIntA(vb,1,0,1);
                                 } else if (sec==1 && eq) {
                                     *eq=0;
                                     WCHAR k[CFG_NAME_MAX], v[128];
