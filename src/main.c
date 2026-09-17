@@ -90,12 +90,13 @@ static HICON MakeTrayIcon(void) {
 /* ---------- 托盘菜单 ---------- */
 static void ShowTrayMenu(void) {
     HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, IDM_GITHUB, L"打开GitHub仓库");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_LOG, L"记录日志");
     AppendMenuW(m, MF_STRING, IDM_OPENCFG, L"打开配置");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(m, MF_STRING, IDM_RESTART, L"重启");
+    AppendMenuW(m, MF_STRING, IDM_RESTART, L"重启程序");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(m, MF_STRING, IDM_GITHUB, L"打开GitHub仓库");
     AppendMenuW(m, MF_STRING, IDM_EXIT, L"退出");
     CheckMenuItem(m, IDM_LOG, g_logging ? MF_CHECKED : MF_UNCHECKED);
     POINT pt;
