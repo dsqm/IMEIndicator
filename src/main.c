@@ -16,6 +16,7 @@ volatile LONG g_showDot = 0;
 #define IDM_EXIT    1002
 #define IDM_LOG     1003
 #define IDM_OPENCFG 1004
+#define IDM_GITHUB  1005
 
 static HWND  g_trayWnd = NULL;
 static HICON g_icon = NULL;
@@ -93,6 +94,7 @@ static void ShowTrayMenu(void) {
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_RESTART, L"重启");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, IDM_GITHUB, L"打开GitHub仓库");
     AppendMenuW(m, MF_STRING, IDM_EXIT, L"退出");
     CheckMenuItem(m, IDM_LOG, g_logging ? MF_CHECKED : MF_UNCHECKED);
     POINT pt;
@@ -177,6 +179,10 @@ static LRESULT CALLBACK TrayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         switch (LOWORD(w)) {
         case IDM_RESTART: RestartApp(); return 0;
         case IDM_OPENCFG: OpenConfig();  return 0;
+        case IDM_GITHUB:
+            ShellExecuteW(NULL, L"open", L"https://github.com/dsqm/IMEIndicator",
+                          NULL, NULL, SW_SHOWNORMAL);
+            return 0;
         case IDM_EXIT:    PostQuitMessage(0); return 0;
         case IDM_LOG:
             InterlockedExchange(&g_logging, g_logging ? 0 : 1);
