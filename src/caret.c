@@ -12,6 +12,11 @@
    坐标一律换算为屏幕物理像素（进程已声明 DPI 感知）。 */
 
 static IUIAutomation* g_uia = NULL;
+/* 树遍历器：IUIAutomation 活着期间内容不变，取一次缓存住即可。原来每次探测
+   取一对、用完 Release，66Hz 下就是每秒 132 次白做的 COM 调用。与 g_uia
+   同生共死（换代重建时一起置 NULL，理由同 g_uia）。 */
+static IUIAutomationTreeWalker* g_walkCV = NULL;
+static IUIAutomationTreeWalker* g_walkRV = NULL;
 
 static void EnsureUia(void) {
     if (g_uia) return;
@@ -20,6 +25,10 @@ static void EnsureUia(void) {
     if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE)
         CoCreateInstance(CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
                          IID_PPV_ARGS(&g_uia));
+    if (g_uia) {
+        if (!g_walkCV) g_uia->get_ControlViewWalker(&g_walkCV);
+        if (!g_walkRV) g_uia->get_RawViewWalker(&g_walkRV);
+    }
     if (!g_uia) {
         /* 创建失败必须留痕：否则"UIA 全通道静默失败 → 永远 miss"无从查起 */
         static ULONGLONG last = 0;
@@ -81,6 +90,20 @@ static int UiRect(CaretPos* out, IUIAutomationTextRange* range, const WCHAR* ch)
         }
     }
     return ok;
+}
+
+/* 焦点是否在 Win32 弹出菜单（上下文菜单，类名 #32768）上。
+   菜单永远没有文本光标，但原来每 15ms 仍会对菜单做 GetFocusedElement +
+   两条 UIA 通道各爬 24 层祖先 + MSAA caret 查询 —— 全是对空气输出，右键
+   菜单打开期间内存/CPU 因此持续上涨。这里直接短路成"没有光标"。
+   （Chromium/传统 Win32 程序的右键菜单都是 #32768；WinUI 的 XAML 弹窗
+   类名不同，由下面的负结果缓存兜住。） */
+static int FocusIsContextMenu(void) {
+    HWND fw = ImeFocusedWindow();
+    if (!fw) return 0;
+    WCHAR cls[16];
+    if (!GetClassNameW(fw, cls, 16)) return 0;
+    return wcscmp(cls, L"#32768") == 0 ? 1 : 0;
 }
 
 /* 方法1：前台线程的 caret 矩形（GetGUIThreadInfo 可跨进程读） */
@@ -159,27 +182,72 @@ static int ViaMsaa(CaretPos* out) {
     return 1;   /* 合理性由 CaretGetPos 的 TRY_CHANNEL 统一过滤（这样 reject 日志才打得出） */
 }
 
+/* ---------- 负结果缓存：这条焦点链上没有目标 pattern ----------
+   上下文菜单 / 资源管理器 / 桌面这类"永远没有文本光标"的焦点，原来每 15ms
+   都要把祖先链爬满 24 层（两条 UIA 通道 = 每秒 3000+ 次跨进程调用），每次
+   右键菜单打开期间内存与 CPU 都持续上涨、停手也不回落（UIA 客户端为每个
+   碰过的元素建封送/缓存结构，不主动还给系统）。现在：同一焦点元素判定过
+   "没有 pattern"后 500ms 内直接跳过；焦点一换 RuntimeId 就不同，立即重查，
+   不影响正常编辑器。查到 pattern 时清缓存。 */
+#define NOPAT_TTL_MS 500
+static unsigned long long g_noPatKey[2] = {0, 0}; /* [0]=TextPattern2 [1]=TextPattern */
+static ULONGLONG          g_noPatTick[2] = {0, 0};
+
+/* 焦点元素的 RuntimeId 哈希（FNV-1a）。取不到/太长都返回 ok=0，调用方
+   当作"没缓存"处理 —— 顶多多爬几层，不会错。 */
+static unsigned long long RidHash(IUIAutomationElement* e, int* ok) {
+    *ok = 0;
+    SAFEARRAY* psa = NULL;
+    if (FAILED(e->GetRuntimeId(&psa)) || !psa) return 0;
+    long lb = 0, ub = -1;
+    SafeArrayGetLBound(psa, 1, &lb);
+    SafeArrayGetUBound(psa, 1, &ub);
+    unsigned long long h = 1469598103934665603ull;
+    if (ub >= lb && (ub - lb) < 16) {
+        long* v = NULL;
+        if (SUCCEEDED(SafeArrayAccessData(psa, (void**)&v)) && v) {
+            for (long i = lb; i <= ub; i++) {
+                h ^= (unsigned long long)(unsigned long)v[i];
+                h *= 1099511628211ull;
+            }
+            SafeArrayUnaccessData(psa);
+            *ok = 1;
+        }
+    }
+    SafeArrayDestroy(psa);
+    return h;
+}
+
 /* 自 GetFocusedElement 向上（NVDA 式）找最近一个实现了指定文本模式的元素：
    Chromium/WinUI 的焦点元素常是深处的子节点，文本模式与光标属于其祖先——
    只在焦点元素上查 GetCaretRange/GetSelection 会拿到别的元素/过期的选区（漂移根因）。 */
 static IUIAutomationElement* UiaFindPattern(IUIAutomationElement* start, BOOL want2) {
+    int slot = want2 ? 0 : 1;
     IUIAutomationElement* e = start;
     if (e) e->AddRef();
-    /* ControlView walker：向上导航（无则退回 RawView；两种都要不到父级就停） */
-    IUIAutomationTreeWalker* walker = NULL;
-    if (g_uia) g_uia->get_ControlViewWalker(&walker);
-    IUIAutomationTreeWalker* rawWalker = NULL;
-    if (g_uia) g_uia->get_RawViewWalker(&rawWalker);
+    /* 负结果缓存命中：同一焦点刚判定过"没有目标 pattern"，别再爬 24 层 */
+    if (e) {
+        int okh = 0;
+        unsigned long long k = RidHash(e, &okh);
+        if (okh && k && k == g_noPatKey[slot] &&
+            GetTickCount64() - g_noPatTick[slot] < NOPAT_TTL_MS) {
+            e->Release();
+            return NULL;
+        }
+    }
+    /* ControlView walker：向上导航（无则退回 RawView；两种都要不到父级就停）。
+       两个 walker 在 EnsureUia 里随 g_uia 缓存，这里只借用，不 Release。 */
+    IUIAutomationTreeWalker* walker = g_walkCV;
+    IUIAutomationTreeWalker* rawWalker = g_walkRV;
 
     int found = 0;
     for (int depth = 0; e && depth < 24; depth++) {
         IUnknown* pat = NULL;
         if (SUCCEEDED(e->GetCurrentPattern(want2 ? UIA_TextPattern2Id : UIA_TextPatternId, &pat)) && pat) {
             pat->Release();
-            if (walker) walker->Release();
-            if (rawWalker) rawWalker->Release();
             if (depth > 0)
                 DbgLog(L"uia: pattern found at depth %d (want2=%d)", depth, want2);
+            g_noPatKey[slot] = 0;      /* 有 pattern：负缓存作废 */
             return e;                 /* 找到了，调用方持有引用 */
         }
         if (pat) pat->Release();
@@ -195,9 +263,12 @@ static IUIAutomationElement* UiaFindPattern(IUIAutomationElement* start, BOOL wa
         found = depth + 1;
     }
     if (e) e->Release();
-    if (walker) walker->Release();
-    if (rawWalker) rawWalker->Release();
-    /* 向上爬到顶都没找到 pattern —— 这是 UIA 通道 miss 的主路径之一，必须留痕 */
+    /* 爬到顶都没有：记入负缓存（同一焦点 500ms 内不再爬）并留痕 */
+    if (start) {
+        int okh = 0;
+        unsigned long long k = RidHash(start, &okh);
+        if (okh && k) { g_noPatKey[slot] = k; g_noPatTick[slot] = GetTickCount64(); }
+    }
     {
         static ULONGLONG last = 0;
         ULONGLONG now = GetTickCount64();
@@ -216,6 +287,9 @@ static int ViaUiaCaretRange(CaretPos* out) {
     IUIAutomationElement* focus = NULL;
     HRESULT hr = g_uia->GetFocusedElement(&focus);
     if (FAILED(hr) || !focus) {
+        /* 防御：个别失败路径会回填非空指针，覆盖前必须放掉
+           （CapsEnhance comptr.h 的规矩：包起来的 = 我们负责放的） */
+        if (focus) { focus->Release(); focus = NULL; }
         /* 兜底：按焦点窗口句柄取元素。GetFocusedElement 依赖对端 UIA provider
            的焦点上报，某些应用（权限差异/沙箱/provider 忙）会拿不到焦点元素，
            但窗口句柄仍然有效 —— Chromium 系应用常见。 */
@@ -223,6 +297,7 @@ static int ViaUiaCaretRange(CaretPos* out) {
         if (fw && SUCCEEDED(g_uia->ElementFromHandle(fw, &focus)) && focus) {
             LogChFail(L"uia_caret", L"GetFocusedElement failed -> fallback hwnd", hr);
         } else {
+            if (focus) { focus->Release(); focus = NULL; }
             LogChFail(L"uia_caret", L"GetFocusedElement & hwnd both failed", hr);
             return 0;
         }
@@ -264,10 +339,12 @@ static int ViaUiaSelection(CaretPos* out) {
     IUIAutomationElement* focus = NULL;
     HRESULT hr = g_uia->GetFocusedElement(&focus);
     if (FAILED(hr) || !focus) {
+        if (focus) { focus->Release(); focus = NULL; }   /* 失败仍回填非空的防御 */
         HWND fw = ImeFocusedWindow();
         if (fw && SUCCEEDED(g_uia->ElementFromHandle(fw, &focus)) && focus) {
             LogChFail(L"uia_sel", L"GetFocusedElement failed -> fallback hwnd", hr);
         } else {
+            if (focus) { focus->Release(); focus = NULL; }
             return 0;   /* uia_caret 通道已记过失败原因，不再重复刷 */
         }
     }
@@ -390,6 +467,11 @@ static int CaretProbeOnce(CaretPos* out) {
        圆点会钉在画面上挡视线。 */
     if (g_cfg.hideFullscreen && CaretIsForegroundFullscreen()) {
         LogNoCaret(L"fullscreen foreground");
+        goto done;
+    }
+    /* 焦点在上下文菜单上：整条链路短路（见 FocusIsContextMenu 注释） */
+    if (FocusIsContextMenu()) {
+        LogNoCaret(L"context menu focused");
         goto done;
     }
     /* UIA caret 排在 MSAA 之前：它带 isActive，能明确区分"有光标"和
@@ -550,9 +632,12 @@ int CaretGetPosEx(CaretPos* out, int* timeoutOut) {
                 DbgLog(L"caret: worker stuck (%d consecutive timeouts) -- respawning", CARET_RESTART_AFTER);
                 InterlockedIncrement(&g_gen);      /* 旧线程醒来见代际不符自行退出 */
                 if (g_workerTh) { CloseHandle(g_workerTh); g_workerTh = NULL; }  /* detach */
-                /* 旧 UIA 对象不 Release（旧 worker 可能还悬在它的调用上），直接弃用换新：
-                   若卡死发生在本地代理锁上，复用旧对象会让新 worker 跟着卡。 */
+                /* 旧 UIA 对象与 walker 不 Release（旧 worker 可能还悬在它的调用上），
+                   直接弃用换新：若卡死发生在本地代理锁上，复用旧对象会让新 worker
+                   跟着卡。 */
                 g_uia = NULL;
+                g_walkCV = NULL;
+                g_walkRV = NULL;
                 CaretSpawnWorker();                /* 新事件对 + 新线程 + 新 COM 对象 */
             }
         }
