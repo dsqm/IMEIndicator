@@ -1,4 +1,5 @@
 #include "ime_indicator.h"
+#include "version.h"    /* 构建脚本按当前日期生成（版本号 = 编译日期） */
 #include <stdlib.h>  /* calloc / free */
 #include <stdio.h>   /* _snwprintf_s */
 #include <wchar.h>   /* wcscmp */
@@ -211,7 +212,8 @@ static void TrayAddIcon(void) {
     nid.uCallbackMessage = WM_TRAYICON;
     nid.hIcon = g_icon ? g_icon : LoadIconW(NULL, IDI_APPLICATION);
     _snwprintf_s(nid.szTip, sizeof(nid.szTip) / sizeof(WCHAR), _TRUNCATE,
-                 L"%s%s", APP_NAME, ProcIsElevated() ? L"（管理员）" : L"");
+                 L"%s v%s%s", APP_NAME, IME_VER_W,
+                 ProcIsElevated() ? L"（管理员）" : L"");
     Shell_NotifyIconW(NIM_ADD, &nid);
 }
 
@@ -474,6 +476,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
 
     ZeroMemory(&g_cfg, sizeof(g_cfg));
     CfgLoad(&g_cfg);            /* 缺配置时在 exe 同目录生成模板 */
+
+    /* 版本号 = 编译日期（构建脚本生成 src/version.h；exe 属性里也能看到） */
+    DbgLog(L"IMEIndicator v%s start", IME_VER_W);
 
     OverlayInit(&g_cfg);        /* 创建悬浮圆点窗口（本线程，走同一消息循环） */
     OverlaySetColor(StateColor(IMEST_EN), g_cfg.dotAlpha);  /* 首帧色（未变状态前用它） */

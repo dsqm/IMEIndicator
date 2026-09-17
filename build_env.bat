@@ -36,7 +36,8 @@ for /f "delims=" %%d in ('dir /b /ad /o-n') do if not defined SDKVER set "SDKVER
 popd
 if not defined SDKVER goto no_sdk
 
-set "PATH=%MSVC%\bin\Hostx64\x64;%PATH%"
+rem rc.exe (resource compiler) lives in the SDK bin, not in the MSVC dir.
+set "PATH=%MSVC%\bin\Hostx64\x64;%SDK%\bin\%SDKVER%\x64;%PATH%"
 set "INCLUDE=%MSVC%\include;%SDK%\Include\%SDKVER%\ucrt;%SDK%\Include\%SDKVER%\um;%SDK%\Include\%SDKVER%\shared"
 set "LIB=%MSVC%\lib\x64;%SDK%\Lib\%SDKVER%\ucrt\x64;%SDK%\Lib\%SDKVER%\um\x64"
 
