@@ -1,0 +1,25 @@
+name: build
+
+# 每次推送都编译；产物作为 artifact 保留，供手动下载验证。
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: cmd
+        run: call build.bat
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IMEIndicator-${{ github.sha }}
+          path: bin/IMEIndicator.exe
+          if-no-files-found: error
