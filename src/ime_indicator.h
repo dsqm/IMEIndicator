@@ -109,7 +109,10 @@ typedef enum {
     CARET_UIA_SEL,   /* UIA TextPattern::GetSelection */
     CARET_IME        /* IME 组合窗口 */
 } CaretSource;
-typedef struct { int x, y, h; int found; CaretSource source; } CaretPos;
+typedef struct { int x, y, h, w; int found; int depth; CaretSource source; } CaretPos;
+/* w 与 depth 只是**诊断信息**（w=矩形宽、depth=文本模式在焦点链上的层数，-1=该通道
+   没有这个概念）：把点摆到"行首"这类漂移，只能靠"宽得像整行"与"模式来自祖先文档"
+   这两个线索分辨，所以随日志一起打出来。 */
 
 /* ---- caret.c ----
    光标查询会**跨进程**调 UIA/MSAA，这些调用没有任何超时机制：前台程序

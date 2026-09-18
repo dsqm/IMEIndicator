@@ -5,11 +5,14 @@
 #include <oleacc.h>   /* MSAA：AccessibleObjectFromWindow + accLocation */
 
 /* ================= 光标位置检测（多级策略） =================
+   顺序（见 CaretProbeOnce 里的 TRY_CHANNEL 链）：
    1) GUI 线程 caret 矩形（GetGUIThreadInfo，经典 Win32 编辑器）；
-   2) UI Automation TextPattern2::GetCaretRange（VS Code 等现代编辑器）；
-   3) UI Automation TextPattern::GetSelection（Chromium / Chrome 系）；
-   4) IME 组合窗口 ImmGetCompositionWindow（候选框定位）。
-   坐标一律换算为屏幕物理像素（进程已声明 DPI 感知）。 */
+   2) UIA TextPattern2::GetCaretRange（VS Code 等现代编辑器）；
+   3) MSAA OBJID_CARET accLocation（Chromium 系的兜底）；
+   4) UIA TextPattern::GetSelection（先收成插入点再取矩形）；
+   5) IME 组合窗口 ImmGetCompositionWindow（候选框定位）。
+   坐标一律换算为屏幕物理像素（进程已声明 DPI 感知）。
+   这些调用都是**跨进程**的且没有超时参数 → 整条链跑在查询线程里（文件末尾）。 */
 
 static IUIAutomation* g_uia = NULL;
 /* 树遍历器：IUIAutomation 活着期间内容不变，取一次缓存住即可。原来每次探测
@@ -55,8 +58,11 @@ static void LogChFail(const WCHAR* ch, const WCHAR* why, HRESULT hr) {
 }
 
 /* 文本范围的边界矩形 -> CaretPos（BoundingRectangles 是 double SAFEARRAY，
-   每个矩形 4 个元素：左 上 宽 高；单位=屏幕坐标）。某些实现给空数组
-   时尝试先 ExpandToEnclosingUnit(Character) 再取。 */
+   每个矩形 4 个元素：左 上 宽 高；单位=屏幕坐标）。宽度写进 out->w（日志诊断用，
+   "宽得像整行"的框就是漂移线索）。
+   ★ 折叠插入点（光标）常读回**空数组**，必须先 ExpandToEnclosingUnit 才有矩形
+   —— 实测 Obsidian 与 WindowsTerminal 都是 raw 为空、expand 后才有值，所以取
+   矩形一律走下面的 RectViaRange，别在调用点自己拼顺序。 */
 static int UiRect(CaretPos* out, IUIAutomationTextRange* range, const WCHAR* ch) {
     SAFEARRAY* arr = NULL;
     HRESULT hr = range->GetBoundingRectangles(&arr);
@@ -74,6 +80,7 @@ static int UiRect(CaretPos* out, IUIAutomationTextRange* range, const WCHAR* ch)
         if (SUCCEEDED(SafeArrayAccessData(arr, (void**)&d)) && d) {
             out->x = (int)d[0];
             out->y = (int)d[1];
+            out->w = (int)d[2];
             out->h = (int)d[3];
             ok = 1;
             SafeArrayUnaccessData(arr);
@@ -90,6 +97,38 @@ static int UiRect(CaretPos* out, IUIAutomationTextRange* range, const WCHAR* ch)
         }
     }
     return ok;
+}
+
+/* UIA 文本范围 -> 插入点坐标。**只接受"正常字符格"**：1 < w ≤ 1.5×h
+   （CJK 字格≈1.0×高、拉丁≈0.5×高，行距算进高里只会更宽裕）。
+   其余形态一律不信、返回 0 让链路落到 MSAA —— OBJID_CARET 的 1px 光标条在
+   Chromium 系（Obsidian / WorkBuddy / GitHub Desktop）实测全部精准。退化范围
+   （插入点）自己的矩形有三种坏形态，全都实测过：
+     a) 空数组 —— Obsidian 正文与标题、WindowsTerminal；
+     b) 1px 细条但位置在**行首** —— 光标在标题行末尾时，真光标在 826，
+        UIA 却给 (677,1124,1,38)（CodeMirror 装饰 span 把"字符"映射到了行首），
+        直接采信就是"光标在后、点在前"；
+     c) 宽块（>1.5×h）—— 装饰 span / 整行的框。
+   早先的"先读 raw"、"按行扩展取右缘"分别踩过 c 和 b，都已废弃。
+   细条被拒后由 MSAA 兜底，所以"可编辑性闸门"必须留在本通道（见调用处）——
+   它挡住"焦点不在文本里时 MSAA 报上一次光标"的老问题。
+   若将来遇到"MSAA 无 caret 对象 + UIA 只有细条"的程序（行尾圆点消失），
+   再考虑把细条当最后兜底 —— 靠日志的 w/d 取证，别拍脑袋。 */
+static int RectViaRange(CaretPos* out, IUIAutomationTextRange* range, const WCHAR* ch) {
+    if (FAILED(range->ExpandToEnclosingUnit(TextUnit_Character))) return 0;
+    return UiRect(out, range, ch) && out->w > 1 && out->w <= (out->h * 3) / 2;
+}
+
+/* 持有该文本模式的元素是不是**可编辑文本框**。
+   为什么要它：Chromium/Electron 在焦点控件上报 isActive=FALSE 却给得出正确矩形
+   （Obsidian 实测：d0 = 可编辑 Edit、isActive=0、expand 后矩形有效），而同一个
+   引擎在"焦点不在文本里"时给出的文档级范围是**上一次的光标** —— 那正是当初
+   "点钉在屏幕上"的根因，当时拿 isActive 当判据，代价是把整个 Electron 生态一起
+   判死。所以 inactive 的范围只在持有者可编辑时才采信。 */
+static int OwnerIsEditable(IUIAutomationElement* el) {
+    int ct = 0;
+    if (FAILED(el->get_CurrentControlType(&ct))) return 0;
+    return ct == UIA_EditControlTypeId;
 }
 
 /* 焦点是否在 Win32 弹出菜单（上下文菜单，类名 #32768）上。
@@ -157,8 +196,9 @@ int CaretIsForegroundFullscreen(void) {
    InputTip 依赖它得到「真实光标」，对 Chromium 等效果比 GetSelection 可靠。
    注意用的是**焦点控件**而不是前台窗口（InputTip 同款）：OBJID_CARET 属于
    焦点控件所在的线程，拿顶层窗口会读到过期/别人的 caret。
-   返回的是绝对屏幕坐标（accLocation 约定）；部分控件给 (0,0) 假数据，
-   交给合理性过滤丢弃。 */
+   返回的是绝对屏幕坐标（accLocation 约定）；**很多控件在没有 caret 时返回
+   (0,0,0,0)** —— 那是假数据，这里直接丢（合理性过滤拦不住它：原点就落在窗口内，
+   放过去的结果是圆点画到屏幕左上角，实测 explorer / M365Copilot 都会这样）。 */
 static int ViaMsaa(CaretPos* out) {
     HWND hwnd = ImeFocusedWindow();
     if (!hwnd) return 0;
@@ -178,8 +218,12 @@ static int ViaMsaa(CaretPos* out) {
         LogChFail(L"msaa", L"accLocation failed", hr);
         return 0;
     }
+    if (x == 0 && y == 0 && h <= 0) {   /* (0,0,0,0)：没有 caret 对象的假数据 */
+        LogChFail(L"msaa", L"accLocation returned (0,0,0,0)", 0);
+        return 0;
+    }
     out->x = (int)x; out->y = (int)y; out->h = (int)h;
-    return 1;   /* 合理性由 CaretGetPos 的 TRY_CHANNEL 统一过滤（这样 reject 日志才打得出） */
+    return 1;   /* 其余合理性由 CaretProbeOnce 的 TRY_CHANNEL 统一过滤（这样 reject 日志才打得出） */
 }
 
 /* ---------- 负结果缓存：这条焦点链上没有目标 pattern ----------
@@ -220,9 +264,11 @@ static unsigned long long RidHash(IUIAutomationElement* e, int* ok) {
 
 /* 自 GetFocusedElement 向上（NVDA 式）找最近一个实现了指定文本模式的元素：
    Chromium/WinUI 的焦点元素常是深处的子节点，文本模式与光标属于其祖先——
-   只在焦点元素上查 GetCaretRange/GetSelection 会拿到别的元素/过期的选区（漂移根因）。 */
-static IUIAutomationElement* UiaFindPattern(IUIAutomationElement* start, BOOL want2) {
+   只在焦点元素上查 GetCaretRange/GetSelection 会拿到别的元素/过期的选区（漂移根因）。
+   depthOut 非空时回填 pattern 所在层数（0=焦点元素自身；诊断"模式来自祖先文档"用）。 */
+static IUIAutomationElement* UiaFindPattern(IUIAutomationElement* start, BOOL want2, int* depthOut) {
     int slot = want2 ? 0 : 1;
+    if (depthOut) *depthOut = -1;
     IUIAutomationElement* e = start;
     if (e) e->AddRef();
     /* 负结果缓存命中：同一焦点刚判定过"没有目标 pattern"，别再爬 24 层 */
@@ -248,6 +294,7 @@ static IUIAutomationElement* UiaFindPattern(IUIAutomationElement* start, BOOL wa
             if (depth > 0)
                 DbgLog(L"uia: pattern found at depth %d (want2=%d)", depth, want2);
             g_noPatKey[slot] = 0;      /* 有 pattern：负缓存作废 */
+            if (depthOut) *depthOut = depth;
             return e;                 /* 找到了，调用方持有引用 */
         }
         if (pat) pat->Release();
@@ -302,9 +349,10 @@ static int ViaUiaCaretRange(CaretPos* out) {
             return 0;
         }
     }
-    IUIAutomationElement* el = UiaFindPattern(focus, TRUE);
-    focus->Release();
-    if (!el) return 0;
+    int depth = -1;
+    IUIAutomationElement* el = UiaFindPattern(focus, TRUE, &depth);
+    if (!el) { focus->Release(); return 0; }
+    out->depth = depth;
     int ok = 0;
     IUnknown* pat = NULL;
     if (SUCCEEDED(el->GetCurrentPattern(UIA_TextPattern2Id, &pat)) && pat) {
@@ -313,15 +361,21 @@ static int ViaUiaCaretRange(CaretPos* out) {
             BOOL active = FALSE;
             IUIAutomationTextRange* range = NULL;
             if (SUCCEEDED(tp2->GetCaretRange(&active, &range)) && range) {
-                /* ★ isActive 就是"当前到底有没有活动光标"。为 FALSE 时不能
-                   再往下走 MSAA —— 那会拿回一个过期的坐标把点钉在屏幕上。
-                   取到文本模式却说没活动光标，就是明确的"没有光标"。 */
-                if (active) {
-                    ok = UiRect(out, range, L"uia_caret");
-                    if (!ok && SUCCEEDED(range->ExpandToEnclosingUnit(TextUnit_Character)))
-                        ok = UiRect(out, range, L"uia_caret");
+                /* ★ isActive=FALSE **不等于没有光标**：MS 文档说它只表示"含光标的
+                   文本控件不持有键盘焦点"。Chromium/Electron 系（Obsidian、VS Code…）
+                   常年在焦点控件上报 FALSE，却给得出正确矩形 —— 照旧取矩形即可。
+                   判据因此从"isActive 说什么"改成"**焦点在不在可编辑控件上**"
+                   （见 OwnerIsEditable 注释）：只有"未持有焦点 + 既不是焦点控件
+                   也不是持有者可编辑"才认定没有光标（-1，不再试后面的通道），
+                   那正是页面/文档级陈旧光标出现的地方 —— 当初把点钉在屏幕上的根因。
+                   （两个元素都要看：文本模式有时挂在焦点控件的祖先文档上。） */
+                int editable = active ? 0
+                                      : (OwnerIsEditable(el) ||
+                                         (focus && OwnerIsEditable(focus)));
+                if (active || editable) {
+                    ok = RectViaRange(out, range, L"uia_caret") ? 1 : 0;
                 } else {
-                    ok = -1;   /* 明确无光标 */
+                    ok = -1;   /* 焦点不在文本里 */
                 }
                 range->Release();
             }
@@ -329,6 +383,7 @@ static int ViaUiaCaretRange(CaretPos* out) {
         }
         pat->Release();
     }
+    focus->Release();
     el->Release();
     return ok;
 }
@@ -348,9 +403,11 @@ static int ViaUiaSelection(CaretPos* out) {
             return 0;   /* uia_caret 通道已记过失败原因，不再重复刷 */
         }
     }
-    IUIAutomationElement* el = UiaFindPattern(focus, FALSE);
+    int depth = -1;
+    IUIAutomationElement* el = UiaFindPattern(focus, FALSE, &depth);
     focus->Release();
     if (!el) return 0;
+    out->depth = depth;
     int ok = 0;
     IUnknown* pat = NULL;
     if (SUCCEEDED(el->GetCurrentPattern(UIA_TextPatternId, &pat)) && pat) {
@@ -361,8 +418,13 @@ static int ViaUiaSelection(CaretPos* out) {
                 int n = 0;
                 if (SUCCEEDED(sel->get_Length(&n)) && n >= 1) {
                     IUIAutomationTextRange* range = NULL;
-                    if (SUCCEEDED(sel->GetElement(0, &range))) {
-                        ok = UiRect(out, range, L"uia_sel");
+                    /* 取**最后一个**选区并把 Start 端点挪到 End：GetSelection 给的
+                       是选区，光标只是它的一个端点，收成插入点才与"光标位置"同义
+                       （InputTip 同款：取 len-1，再 MoveEndpointByRange(Start→End)）。 */
+                    if (SUCCEEDED(sel->GetElement(n - 1, &range)) && range) {
+                        range->MoveEndpointByRange(TextPatternRangeEndpoint_Start, range,
+                                                   TextPatternRangeEndpoint_End);
+                        ok = RectViaRange(out, range, L"uia_sel");
                         range->Release();
                     }
                 }
@@ -442,18 +504,19 @@ static void LogNoCaret(const WCHAR* why) {
     DbgLog(L"no caret: %s", why);
 }
 
-/* 返回 1=拿到坐标，-1=该通道明确报告"当前没有光标"（不再试后面的通道） */
-#define TRY_CHANNEL(detector, src)                                            \
+/* 返回 1=拿到坐标，-1=该通道明确报告"当前没有光标"（不再试后面的通道）。
+   why 是判"没有光标"的原因，随日志打出来（目前只有 uia_caret 会走这条）。 */
+#define TRY_CHANNEL(detector, src, why)                                       \
     do {                                                                      \
         int r = (detector)(out);                                              \
         if (r < 0) {                                                          \
-            LogNoCaret(L"uia_caret reports inactive");                        \
+            LogNoCaret(why);                                                  \
             goto done;                                                        \
         }                                                                     \
         if (r > 0) {                                                          \
             if (CaretPlausible(out)) { out->source = (src); goto done; }      \
-            DbgLog(L"reject %s caret=(%d,%d,h=%d)", CaretSrcName(src),        \
-                   out->x, out->y, out->h);                                   \
+            DbgLog(L"reject %s caret=(%d,%d,w=%d,h=%d,d=%d)",                 \
+                   CaretSrcName(src), out->x, out->y, out->w, out->h, out->depth); \
         }                                                                     \
     } while (0)
 
@@ -463,6 +526,8 @@ static int CaretProbeOnce(CaretPos* out) {
     EnsureUia();
     out->found = 0;
     out->source = CARET_NONE;
+    out->w = 0;
+    out->depth = -1;
     /* 全屏（看视频/演示）时一律不显示：此时 MSAA 会报出上一次的陈旧光标位置，
        圆点会钉在画面上挡视线。 */
     if (g_cfg.hideFullscreen && CaretIsForegroundFullscreen()) {
@@ -474,13 +539,16 @@ static int CaretProbeOnce(CaretPos* out) {
         LogNoCaret(L"context menu focused");
         goto done;
     }
-    /* UIA caret 排在 MSAA 之前：它带 isActive，能明确区分"有光标"和
-       "只有个过期坐标"；MSAA 拿这个信息，所以只能当兜底。 */
-    TRY_CHANNEL(ViaGuiInfo, CARET_GUIINFO);
-    TRY_CHANNEL(ViaUiaCaretRange, CARET_UIA_CARET);
-    TRY_CHANNEL(ViaMsaa, CARET_MSAA);
-    TRY_CHANNEL(ViaUiaSelection, CARET_UIA_SEL);
-    TRY_CHANNEL(ViaIme, CARET_IME);
+    /* UIA caret 排在 MSAA 之前，职责是**把关**：判定"焦点在不在可编辑控件"
+       （不在 → -1，整条链停，MSAA 的陈旧坐标就没机会出来），并只在自己能给
+       出"正常字符格"时提供坐标；细条/空/宽块一律返回 0 落到 MSAA 的 1px
+       光标条 —— Chromium 系实测 MSAA 比 UIA 的文本范围准。 */
+    TRY_CHANNEL(ViaGuiInfo, CARET_GUIINFO, L"guiinfo: no caret hwnd");
+    TRY_CHANNEL(ViaUiaCaretRange, CARET_UIA_CARET,
+                L"uia_caret: inactive caret outside an editable control");
+    TRY_CHANNEL(ViaMsaa, CARET_MSAA, L"msaa: no caret object");
+    TRY_CHANNEL(ViaUiaSelection, CARET_UIA_SEL, L"uia_sel: no caret rect");
+    TRY_CHANNEL(ViaIme, CARET_IME, L"ime: no composition window");
 done:
     if (out->source != CARET_NONE) { out->found = 1; return 1; }
     out->x = out->y = out->h = 0;
@@ -599,6 +667,8 @@ int CaretGetPosEx(CaretPos* out, int* timeoutOut) {
     out->found = 0;
     out->source = CARET_NONE;
     out->x = out->y = out->h = 0;
+    out->w = 0;
+    out->depth = -1;
     if (timeoutOut) *timeoutOut = 0;
     if (!g_workerTh) CaretSpawnWorker();       /* 上次重建失败：本轮再试 */
     if (!g_workerTh) return 0;
