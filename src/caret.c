@@ -145,6 +145,48 @@ static int FocusIsContextMenu(void) {
     return wcscmp(cls, L"#32768") == 0 ? 1 : 0;
 }
 
+/* ---------- 跨进程 DPI 换算（guiinfo 通道专用） ----------
+   rcCaret 是**对方窗口**的客户端坐标，ClientToScreen 只是把它接在窗口原点后面，
+   而那个原点是**我们**看到的物理像素 —— 两者坐标空间未必一致：对方若不是
+   Per-Monitor 感知（MMC/任务计划程序这类 unaware 程序在 175% 下 logical=96、
+   physical=168），偏移量会被低估一个固定比值，表现为**光标越往右、打的字越多
+   圆点偏得越远**（用户实测）。换算：物理 = 原点 + 偏移 × 显示器DPI / 窗口DPI。
+   本进程是 Per-Monitor V2，所以比值恒为 1 时完全不改动原行为。 */
+typedef UINT (WINAPI* PFN_GETDPIFORWINDOW)(HWND);
+typedef HRESULT (WINAPI* PFN_GETDPIFORMONITOR)(HMONITOR, int, UINT*, UINT*);
+
+static UINT WindowDpi(HWND hwnd) {
+    static PFN_GETDPIFORWINDOW fn = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        fn = (PFN_GETDPIFORWINDOW)GetProcAddress(GetModuleHandleW(L"user32.dll"),
+                                                 "GetDpiForWindow");
+    }
+    if (!fn) return 0;      /* 取不到就不换算（宁可沿用旧行为） */
+    return fn(hwnd);
+}
+
+static UINT MonitorDpi(HWND hwnd) {
+    static PFN_GETDPIFORMONITOR fn = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        HMODULE sh = LoadLibraryW(L"shcore.dll");
+        if (sh) fn = (PFN_GETDPIFORMONITOR)GetProcAddress(sh, "GetDpiForMonitor");
+    }
+    UINT dx = 0, dy = 0;
+    if (fn) {
+        HMONITOR hm = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (hm && SUCCEEDED(fn(hm, 0 /*MDT_EFFECTIVE_DPI*/, &dx, &dy)) && dy)
+            return dy;
+    }
+    HDC hdc = GetDC(NULL);                 /* 兜底：主显示器 DPI */
+    UINT d = hdc ? (UINT)GetDeviceCaps(hdc, LOGPIXELSY) : 0;
+    if (hdc) ReleaseDC(NULL, hdc);
+    return d ? d : 96;
+}
+
 /* 方法1：前台线程的 caret 矩形（GetGUIThreadInfo 可跨进程读） */
 static int ViaGuiInfo(CaretPos* out) {
     HWND fg = GetForegroundWindow();
@@ -156,9 +198,28 @@ static int ViaGuiInfo(CaretPos* out) {
     if (tid && GetGUIThreadInfo(tid, &gi) && gi.hwndCaret) {
         int x = gi.rcCaret.left, y = gi.rcCaret.top;
         int h = gi.rcCaret.bottom - gi.rcCaret.top;
-        POINT pt = { x, y };
-        if (ClientToScreen(gi.hwndCaret, &pt)) {
-            out->x = pt.x; out->y = pt.y; out->h = h;
+        int w = gi.rcCaret.right - gi.rcCaret.left;
+        POINT org = { 0, 0 }, pt = { x, y };
+        if (ClientToScreen(gi.hwndCaret, &org) && ClientToScreen(gi.hwndCaret, &pt)) {
+            UINT dpiW = WindowDpi(gi.hwndCaret), dpiM = MonitorDpi(gi.hwndCaret);
+            if (dpiW && dpiM && dpiW != dpiM) {
+                /* 实测（本机 175%）：unaware 进程里光标在 20 个字符后，
+                   rcCaret.left=160（96 逻辑像素），真实物理位置 = 窗口原点 609 + 280；
+                   旧算法直接把 160 当物理偏移 → 偏 121px，且随字符数线性放大。 */
+                int ox = pt.x - org.x, oy = pt.y - org.y;
+                pt.x = org.x + MulDiv(ox, (int)dpiM, (int)dpiW);
+                pt.y = org.y + MulDiv(oy, (int)dpiM, (int)dpiW);
+                h = MulDiv(h, (int)dpiM, (int)dpiW);
+                w = MulDiv(w, (int)dpiM, (int)dpiW);
+                /* 只在比值变化时记一行（同一个程序里会连着几百轮） */
+                static UINT lastW = 0, lastM = 0;
+                if (lastW != dpiW || lastM != dpiM) {
+                    lastW = dpiW; lastM = dpiM;
+                    DbgLog(L"guiinfo: DPI %lu -> %lu, caret offset scaled",
+                           (unsigned long)dpiW, (unsigned long)dpiM);
+                }
+            }
+            out->x = pt.x; out->y = pt.y; out->h = h; out->w = w;
             return 1;
         }
     }
@@ -453,8 +514,14 @@ static int ViaIme(CaretPos* out) {
         COMPOSITIONFORM cf;
         ZeroMemory(&cf, sizeof(cf));
         if (ImmGetCompositionWindow(hImc, &cf) && (cf.dwStyle & CFS_POINT)) {
-            POINT pt = { cf.ptCurrentPos.x, cf.ptCurrentPos.y };
-            if (ClientToScreen(fg, &pt)) {
+            POINT org = { 0, 0 }, pt = { cf.ptCurrentPos.x, cf.ptCurrentPos.y };
+            if (ClientToScreen(fg, &org) && ClientToScreen(fg, &pt)) {
+                /* ptCurrentPos 同样是**对方**客户端坐标 → 与 guiinfo 同一套 DPI 换算 */
+                UINT dpiW = WindowDpi(fg), dpiM = MonitorDpi(fg);
+                if (dpiW && dpiM && dpiW != dpiM) {
+                    pt.x = org.x + MulDiv(pt.x - org.x, (int)dpiM, (int)dpiW);
+                    pt.y = org.y + MulDiv(pt.y - org.y, (int)dpiM, (int)dpiW);
+                }
                 out->x = pt.x; out->y = pt.y; out->h = 20;
                 ok = 1;
             }
