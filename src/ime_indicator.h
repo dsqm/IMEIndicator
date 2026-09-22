@@ -45,8 +45,12 @@ typedef struct {
     int          trackMs; /* 光标追踪间隔                                        */
     int          imeStrategy; /* 中英判定策略：0=自动学习 1=open状态 2=转换模式    */
     int          hideFullscreen; /* 1=前景窗口全屏时不显示圆点（看视频不遮挡）    */
+    int          hideComposition;/* 1=输入法组合窗显示时隐藏圆点（它贴在光标处）  */
     int          caretTimeoutMs; /* 单次光标查询最长等待(ms)：超时即放弃本轮，
                                     前台程序卡住时不让检测线程跟着冻住        */
+    int          autoHideMs;    /* "临时显示"时长(ms)：清单里的状态只显示这么久
+                                    就自动消失；0=不用临时显示（全部常显）      */
+    int          autoHideMask;  /* 参与临时显示的状态集合：1<<ImeState 位掩码    */
 } ImeCfg;
 
 /* 换窗口后，向 IME 问到的仍是**上一个窗口**的值（实测滞后 200~300ms）。
@@ -62,6 +66,10 @@ typedef struct {
     IMEST_KR,          /* 韩文输入法（键盘布局主语言 0x12） */
     IMEST_COUNT
 } ImeState;
+
+/* AutoHideStates 在内存里按位掩码存（每状态 1 位） */
+#define IME_AH_BIT(s) (1u << (int)(s))
+#define IME_AH_ALL    ((1u << (int)IMEST_COUNT) - 1u)
 
 /* ---- config.c ---- */
 void   CfgLoad(ImeCfg* c);      /* 读 IMEIndicator.ini（缺则写模板） */
@@ -98,6 +106,7 @@ typedef struct {
 
 int    ImeIsChineseModeEx(ImeProbe* p);  /* p 可为 NULL：同 ImeIsChineseMode */
 void   ImeSetForcedStrategy(int s);      /* 0=自动 1=open 状态 2=转换模式   */
+int    ImeFloatOccluding(HWND focus); /* 焦点线程上是否出现打字浮窗（组合/候选） */
 
 /* ---- caret.c ---- */
 /* 本次坐标由哪条通道提供（日志诊断漂移用） */

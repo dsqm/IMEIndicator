@@ -290,3 +290,52 @@ int ImeKeyboardLang(void) {
 int ImeIsEnglishKeyboard(void) {
     return ImeKeyboardLang() == 0x09;
 }
+
+/* ---------- 通用浮窗打字检测 ----------
+   输入法窗口类名各家不同（微软拼音 MSCTFIME Composition、搜狗 SoPY_Comp、
+   QQ拼音/百度又是别的），维护类名白名单永远追不完。改用与类名解耦的通用规则：
+   **焦点线程上出现可见的"不抢焦点"浮动窗 = 正在打字**。输入法的组合窗/候选窗
+   （不论跟随光标还是固定位置、横排竖排）都是 WS_EX_TOPMOST / WS_EX_NOACTIVATE
+   浮动窗，出现即说明输入法正在组织输入。
+   排除项（防止常驻浮窗把圆点永久藏住）：
+     - 焦点窗口的根窗口（正常交互窗口）；
+     - 会抢焦点的普通窗口（无 TOPMOST/NOACTIVATE）；
+     - WS_EX_TRANSPARENT 穿透窗；
+     - 已知输入法 UI 类名（kImeUiClass）直接命中，兜底样式特殊的实现。
+   EnumThreadWindows 不发跨进程消息，不占卡顿预算。 */
+static const WCHAR* const kImeUiClass[] = {
+    L"MSCTFIME Composition",   /* 微软拼音 */
+    L"SoPY_Comp",              /* 搜狗：组合窗/候选窗 */
+    L"SoPY_Hint",              /* 搜狗：光标旁小提示窗 */
+};
+
+static HWND  g_focusRoot;
+static int   g_occluded;
+
+static BOOL CALLBACK OccludingEnum(HWND hw, LPARAM lp) {
+    (void)lp;
+    if (!IsWindowVisible(hw)) return TRUE;
+    if (hw == g_focusRoot) return TRUE;
+    WCHAR cls[32];
+    if (GetClassNameW(hw, cls, 32)) {
+        for (size_t i = 0; i < sizeof(kImeUiClass)/sizeof(kImeUiClass[0]); i++) {
+            if (wcscmp(cls, kImeUiClass[i]) == 0) { g_occluded = 1; return FALSE; }
+        }
+    }
+    DWORD ex = (DWORD)GetWindowLongPtrW(hw, GWL_EXSTYLE);
+    if (!(ex & (WS_EX_TOPMOST | WS_EX_NOACTIVATE))) return TRUE;
+    if (ex & WS_EX_TRANSPARENT) return TRUE;
+    g_occluded = 1;   /* 焦点线程上的打字浮窗：不论位置在哪，正在输入 */
+    return FALSE;
+}
+
+int ImeFloatOccluding(HWND focus) {
+    if (!focus) return 0;
+    DWORD tid = GetWindowThreadProcessId(focus, NULL);
+    if (!tid) return 0;
+    g_focusRoot = GetAncestor(focus, GA_ROOT);
+    if (!g_focusRoot) g_focusRoot = focus;
+    g_occluded = 0;
+    EnumThreadWindows(tid, OccludingEnum, 0);
+    return g_occluded;
+}

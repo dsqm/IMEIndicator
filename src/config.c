@@ -22,6 +22,46 @@ static int   g_ignoreCount = 0;
 
 #define ISAME(s,w) (_stricmp(s,w)==0)
 
+/* ---------- AutoHideStates：逗号分隔的状态名列表 ----------
+   状态名沿用 [Colors] 的键名（En/Caps/KbdEn/Cn/Jp/Kr，大小写不敏感），
+   另支持 all（全部状态都走临时显示）与 none（都不走 = 关掉这个功能）。
+   ★ 值里可以跟行内注释（`AutoHideStates = Cn  ; 只有中文态`）：遇到 ';'
+   一律停读，否则注释里的中文词会被当成状态名去匹配。
+   空值（键写了没给值）或全是认不出的词 —— 保持传入的默认掩码。 */
+static const struct { const char* name; unsigned bit; } kStateBits[] = {
+    { "en",    IME_AH_BIT(IMEST_EN)     },
+    { "caps",  IME_AH_BIT(IMEST_CAPS)   },
+    { "kbden", IME_AH_BIT(IMEST_KBD_EN) },
+    { "cn",    IME_AH_BIT(IMEST_CN)     },
+    { "jp",    IME_AH_BIT(IMEST_JP)     },
+    { "kr",    IME_AH_BIT(IMEST_KR)     },
+};
+
+static int ParseStatesA(const char* v, int defMask) {
+    if (!v) return defMask;
+    while (*v==' '||*v=='\t') v++;
+    if (!*v || *v==';') return defMask;      /* 没给值 */
+    int mask = 0, any = 0;
+    while (*v && *v != ';') {
+        while (*v==' '||*v=='\t'||*v==',') v++;
+        if (!*v || *v==';') break;
+        const char* tok = v;
+        while (*v && *v!=',' && *v!=';' && *v!=' ' && *v!='\t') v++;
+        size_t n = (size_t)(v - tok);
+        if (!n) break;
+        if (n==3 && !_strnicmp(tok,"all",3))       { mask = (int)IME_AH_ALL; any = 1; continue; }
+        if (n==4 && !_strnicmp(tok,"none",4))      { mask = 0;               any = 1; continue; }
+        for (size_t i = 0; i < sizeof(kStateBits)/sizeof(kStateBits[0]); i++) {
+            if (strlen(kStateBits[i].name)==n && !_strnicmp(tok,kStateBits[i].name,n)) {
+                mask |= (int)kStateBits[i].bit;
+                any = 1;
+                break;
+            }
+        }
+    }
+    return any ? mask : defMask;
+}
+
 /* ---------- 已有配置文件补写新参数 ----------
    程序升级后模板里新增的键，用户手上的旧 ini 里没有 —— 光靠默认值，用户想改
    却找不到那一行。这里把缺的键（连注释）补插到对应段标题行之后。
@@ -57,6 +97,27 @@ static const CfgUpgrade kUpgrades[] = {
       "; 形状：circle=圆（默认） triangle=三角形（等边，尖角朝上）\n"
       "; 两者尺寸都按同一个 Size 算，换形状不用重新调大小。\n"
       "Shape = circle\n" },
+    { "HideWhenComposition",
+      "[General]",
+      ";\n"
+      "; 输入法组合窗显示时隐藏圆点：微软拼音打字时会在光标旁画拼音串（还有候选\n"
+      "; 列表），和圆点正好重叠，0 = 不管它。组合结束（上屏/Esc）圆点自动回来。\n"
+      "HideWhenComposition = 1\n" },
+    { "AutoHideMs",
+      "[General]",
+      ";\n"
+      "; 「临时显示」：名单里的状态只在发生变化后露一小会儿就自动消失，而不是一直\n"
+      "; 钉在光标旁。这个值 = 每次显示多久(ms)；0 = 不启用临时显示（所有状态常显）。\n"
+      "AutoHideMs = 1000\n" },
+    /* ★ 与上一条拆开写：两条各自判定"缺失"。合成一条的话，只缺其中一个的用户
+       会被整块补写，于是多出一行重复键（后写的覆盖用户手改的值）。 */
+    { "AutoHideStates",
+      "[General]",
+      ";\n"
+      "; 参与临时显示的状态名单：逗号分隔，状态名同下面 [Colors] 的键名；\n"
+      "; all = 全部状态都临时显示，none = 全部维持常显。\n"
+      "; ★ 色值写 0 的状态始终不显示，这条优先于名单。\n"
+      "AutoHideStates = Cn\n" },
 };
 
 /* buf 里找裸键名（行首可有空白，键名后跟空白或'='，避免撞上别的单词） */
@@ -224,6 +285,7 @@ static int ParseShapeA(const char* v, int def) {
 #define DEF_EN_RGB   0xFF0000  /* 红                                     */
 #define DEF_CAPS_RGB 0x0080FF  /* 蓝                                     */
 #define DEF_KBDEN_RGB 0x8B00FF /* 紫                                     */
+#define DEF_CN_RGB   0x00A000  /* 绿（中文态；临时显示，不长期占位）       */
 #define DEF_JP_RGB   0x000000  /* 黑                                     */
 #define DEF_KR_RGB   0x000000  /* 黑                                     */
 #define DEF_ALPHA   255
@@ -245,12 +307,15 @@ void CfgLoad(ImeCfg* c) {
     int defAl=DEF_ALPHA;
     DWORD en=DEF_EN_RGB, caps=DEF_CAPS_RGB, kbden=DEF_KBDEN_RGB;
     DWORD jp=DEF_JP_RGB, kr=DEF_KR_RGB;
-    DWORD cn=IME_COLOR_NONE;   /* Cn 默认不显示：中文态无圆点 */
+    DWORD cn=DEF_CN_RGB;       /* 中文态：绿色，且默认走"临时显示"（见 AutoHideStates） */
     c->size=9; c->offsetX=2; c->offsetY=4; c->pollMs=100; c->trackMs=15;
     c->imeStrategy=0;
     c->hideFullscreen=1;
+    c->hideComposition=1;
     c->caretTimeoutMs=150;
     c->shape=SHAPE_CIRCLE;
+    c->autoHideMs=1000;                    /* 临时显示时长 */
+    c->autoHideMask=(int)IME_AH_BIT(IMEST_CN);  /* 默认只有中文态临时显示 */
 
     /* 旧配置文件里缺新参数时先补写（本次启动就能读到新键） */
     UpgradeIniFile(path);
@@ -273,9 +338,23 @@ void CfgLoad(ImeCfg* c) {
             "; 的陈旧坐标，圆点会一直钉在画面上挡视线。\n"
             "HideWhenFullscreen = 1\n"
             ";\n"
+            "; 输入法组合窗显示时隐藏圆点：微软拼音打字时会在光标旁画拼音串（还有候选\n"
+            "; 列表），和圆点正好重叠，0 = 不管它。组合结束（上屏/Esc）圆点自动回来。\n"
+            "HideWhenComposition = 1\n"
+            ";\n"
             "; 单次光标查询最长等待(ms)：光标检测要跨进程问 UIA/MSAA，对方程序卡住时\n"
             "; 会一直不返回。超时即放弃本轮查询（沿用上一轮显示），不冻结检测线程。\n"
             "CaretTimeoutMs = 150\n"
+            ";\n"
+            "; 「临时显示」：名单里的状态只在发生变化后露一小会儿就自动消失，\n"
+            "; 而不是一直钉在光标旁。AutoHideMs = 每次显示多久(ms)，0 = 不启用\n"
+            "; 临时显示（所有状态都常显）。\n"
+            "AutoHideMs = 1000\n"
+            ";\n"
+            "; 参与临时显示的状态名单，逗号分隔，状态名同下面 [Colors] 的键名；\n"
+            "; all = 全部状态都临时显示，none = 全部维持常显。\n"
+            "; ★ 色值写 0 的状态始终不显示，这条优先于名单。\n"
+            "AutoHideStates = Cn\n"
             ";\n"
             "[Colors]\n"
             "; 颜色格式固定 #RRGGBB（6 位十六进制，必须带 #）；透明度一律用下面的 Alpha\n"
@@ -285,7 +364,7 @@ void CfgLoad(ImeCfg* c) {
             "KbdEn= #8B00FF   ; 英文键盘布局（默认紫色）\n"
             "Jp   = #000000   ; 日文输入法（默认黑色）\n"
             "Kr   = #000000   ; 韩文输入法（默认黑色）\n"
-            "Cn   = 0         ; 中文输入（0=不显示；设颜色值则中文态显示该色）\n"
+            "Cn   = #00A000   ; 中文输入（默认绿色；默认属 AutoHideStates，只闪一下）\n"
             "Alpha= 255       ; 圆点全局不透明度 0..255（0=全透）\n"
             ";\n"
             "[Overlay]\n"
@@ -297,7 +376,7 @@ void CfgLoad(ImeCfg* c) {
             "OffsetY = 4      ; 相对光标底缘的垂直偏移（+ 下）\n"
             ";\n"
             "[Ignore]\n"
-            "; 前台程序命中名单时，跳过中英状态检测（检测本身可能卡顿，而非圆点显示）。\n"
+            "; 前台程序命中名单时**彻底隐身**：不做状态检测、不做光标查询、不显示圆点。\n"
             "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写。\n"
             "; 例：\n"
             "; somegame.exe\n";
@@ -352,7 +431,10 @@ void CfgLoad(ImeCfg* c) {
                                     else if (ISAME(kb,"trackintervalms")) c->trackMs=ParseIntA(vb,15,5,200);
                                     else if (ISAME(kb,"imestrategy")) c->imeStrategy=ParseIntA(vb,0,0,2);
                                     else if (ISAME(kb,"hidewhenfullscreen")) c->hideFullscreen=ParseIntA(vb,1,0,1);
+                                    else if (ISAME(kb,"hidewhencomposition")) c->hideComposition=ParseIntA(vb,1,0,1);
                                     else if (ISAME(kb,"carettimeoutms")) c->caretTimeoutMs=ParseIntA(vb,150,20,5000);
+                                    else if (ISAME(kb,"autohidems")) c->autoHideMs=ParseIntA(vb,1000,0,60000);
+                                    else if (ISAME(kb,"autohidestates")) c->autoHideMask=ParseStatesA(vb,c->autoHideMask);
                                 } else if (sec==1 && eq) {
                                     *eq=0;
                                     WCHAR k[CFG_NAME_MAX], v[128];

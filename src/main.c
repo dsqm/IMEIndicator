@@ -283,7 +283,19 @@ static DWORD StateColor(ImeState s) {
     }
 }
 
+/* 该状态是否走"临时显示"（露一小会儿就收）：AutoHideMs=0 或状态不在名单里 = 常显 */
+static int StateIsTransient(ImeState s) {
+    return g_cfg.autoHideMs > 0 && (g_cfg.autoHideMask & IME_AH_BIT(s)) != 0;
+}
+
 /* ---------- 检测线程 ---------- */
+
+/* 上屏宽限：浮窗消失（上屏/Esc）后的这段时间里，光标的前跳/回跳是输入法的
+   自动行为，不算"光标变化"—— 连续输入 nihao_w_s_ 时，组合串增长推着光标走、
+   上屏又让它前跳，若照常续命，圆点会在"遮挡隐藏 <-> 上屏显示"之间来回闪。
+   只影响续命（临时显示的倒计时），坐标跟随照旧。 */
+#define IME_COMMIT_GRACE_MS 600
+
 static DWORD WINAPI DetectorThread(LPVOID param) {
     (void)param;
     if (GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))
@@ -308,6 +320,16 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
     int  settleGate = 0;        /* 1=刚换窗口、状态未定，这段不显示圆点 */
     ULONGLONG gateAt = 0;       /* 闸门最近一次"收起"的时刻 */
     int  wasSettling = 0;       /* 上一拍的 settling，用来抓 0->1 跳变 */
+    /* ---- 临时显示（AutoHideMs / AutoHideStates） ----
+       ahAt = 最近一次"值得亮一下"的时刻。三种由头会刷新它：状态变化、光标坐标变化、
+       越过"状态未定"期（换窗口/换焦点控件后放行）。其后 AutoHideMs 内一直显示，
+       到期自动收起；再动再亮。起点取线程启动时刻 —— 启动先亮一下告知当前状态。 */
+    ULONGLONG ahAt = GetTickCount64();
+    CaretPos lastCp;            /* 最近一次查询到的坐标：判"有没有动"、以及超时时顶替 */
+    ZeroMemory(&lastCp, sizeof(lastCp));
+    int      haveLastCp = 0;    /* 0=还没查到过有效坐标，此时 lastCp 的内容不算数 */
+    int      wasOccl = 0;       /* 上一拍的浮窗遮挡状态：抓 1->0 边沿（上屏/取消） */
+    ULONGLONG occlEndAt = 0;    /* 浮窗最近一次消失的时刻（上屏宽限起点） */
 
     for (;;) {
         Sleep(trackMs > 0 ? (DWORD)trackMs : 15);
@@ -336,6 +358,15 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             if (g_logging) DbgLog(L"%s", blocked ? L"IGNORE: skip-detect" : L"IGNORE: resume-detect");
         }
 
+        /* [Ignore] 命中 = **彻底隐身**：不去碰前台程序（跨进程查询是卡顿与干扰的根），
+           圆点也不显示。离开黑名单时清掉旧坐标，让它第一帧算一次"光标变化"重新亮。 */
+        if (blocked) {
+            if (shown) { OverlaySetVisible(0); shown = 0; }
+            haveLastCp = 0;
+            lastPoll = 0;               /* 解除后立即重算状态，别沿用黑名单期间的值 */
+            continue;
+        }
+
         /* 前台顶层窗口换了：**立刻**重算状态（别等 pollMs 那一拍，否则旧状态
            会多显示最多 100ms），并进入"状态未定"期 —— 这期间显示任何颜色都是猜的。
            判定用顶层窗口而不是焦点控件：同一个窗口内换控件（浏览器地址栏↔页面）
@@ -350,11 +381,9 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             gateAt = now;
             if (g_logging) DbgLog(L"settle: arm fg=%p", (void*)top);
         }
-        if (blocked) settleGate = 0;   /* 黑名单期间不重算状态，别把点一直藏着 */
-
-        /* 状态（按 pollMs 节流重算颜色）；命中黑名单时本段跳过 */
+        /* 状态（按 pollMs 节流重算颜色） */
         int stateChanged = 0;
-        if (!blocked && now - lastPoll >= (ULONGLONG)pollMs) {
+        if (now - lastPoll >= (ULONGLONG)pollMs) {
             lastPoll = now;
             ImeState prev = cur;
             int lang = ImeKeyboardLang();
@@ -380,6 +409,7 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             if (cur != prev) {
                 stateChanged = 1;
                 OverlaySetColor(StateColor(cur), g_cfg.dotAlpha);
+                ahAt = now;                     /* 状态变化 = 一次临时显示的由头 */
             }
         }
 
@@ -407,11 +437,24 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             if (g_logging)
                 DbgLog(L"settle: release held=%I64u ms", (unsigned long long)(now - gateAt));
             settleGate = 0;
+            ahAt = now;   /* 换窗口/换焦点后放行：哪怕坐标没变，也该让人看一眼当前状态 */
         }
 
         /* 通用规则：当前状态色为 IME_COLOR_NONE -> 不显示圆点（如 Cn=0 时中文态隐藏）。
            "状态未定"期间同样不显示：宁可这段短暂没有点，也不要先亮错颜色再消失。 */
         int want = (!settleGate) && (StateColor(cur) != IME_COLOR_NONE);
+
+        /* 浮窗打字检测：输入法组合窗/候选窗（不论跟随光标还是固定位置）都是
+           "不抢焦点的浮动窗"，在焦点线程上出现即说明正在输入，圆点让位。
+           与输入法类名解耦（各家类名不同，白名单追不完）。want 已是 0 时不查。 */
+        int occluded = wasOccl;     /* 本拍没查（want=0）时沿用上一拍，边沿判定才连续 */
+        if (want && g_cfg.hideComposition) {
+            HWND f = ImeFocusedWindow();
+            occluded = (f && ImeFloatOccluding(f));
+            if (occluded) want = 0;
+        }
+        if (!occluded && wasOccl) occlEndAt = now;   /* 遮挡结束：上屏或取消 */
+        wasOccl = occluded;
 
         /* 光标追踪：找到就跟随，找不到就隐藏。
            CaretGetPosEx 内部是"交给查询线程 + 按超时等"：前台程序卡住时它返回 0
@@ -422,7 +465,44 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
         int got = 0, caretTimedOut = 0;
         if (want) {
             got = CaretGetPosEx(&cp, &caretTimedOut);
-            if (!got && caretTimedOut) got = shown;   /* 超时：保持现状 */
+            /* timeoutOut 时 cp 已被清零，不能直接拿去 Move —— 那样圆点会甩到屏幕
+               左上角（前台程序一卡就能看见）。顶替成最近一次的有效坐标即可；
+               连这个都没有（从来没查到过）就维持现状，本帧按"没查到"处理。 */
+            if (!got && caretTimedOut) {
+                if (haveLastCp) cp = lastCp;
+                got = (shown && haveLastCp) ? 1 : 0;
+            }
+        }
+
+        /* 「该亮了」的第三种由头：光标坐标动了。
+           坐标连同 h 一起比：换到另一个编辑框时 x/y 可能巧合相同，行高多半不同。
+           ★ 超时顶替的坐标不会触发这里（它等于 lastCp），避免前台卡住时被无限续命。 */
+        if (got) {
+            int moved = !haveLastCp || cp.x != lastCp.x || cp.y != lastCp.y || cp.h != lastCp.h;
+            if (moved) {
+                lastCp = cp;
+                haveLastCp = 1;
+                /* 遮挡期间与遮挡结束后短宽限内的光标移动不续命：那是输入法的
+                   自动行为（组合串增长推着 caret 走、上屏让 caret 前跳），不是
+                   用户在动。位置照常更新，圆点该藏就藏、该停就停，不闪。 */
+                int inGrace = occluded ||
+                              (occlEndAt && now - occlEndAt < (ULONGLONG)IME_COMMIT_GRACE_MS);
+                if (!inGrace) ahAt = now;
+            }
+        } else {
+            haveLastCp = 0;   /* 光标确实没了：丢掉陈旧坐标，再现时算一次变化 */
+        }
+
+        /* 临时显示到期：名单里的状态亮够 AutoHideMs 就收起。
+           注意收起期间**照旧查询光标** —— 否则察觉不到"用户又开始动了"，圆点就再也
+           回不来。开销与"常显状态"完全相同（本来也是每 trackMs 查一次）。 */
+        int transient = StateIsTransient(cur);
+        ULONGLONG ahLeft = 0;
+        if (transient) {
+            ULONGLONG held = now - ahAt;
+            unsigned ms = (unsigned)g_cfg.autoHideMs;
+            if (held >= (ULONGLONG)ms) got = 0;
+            else ahLeft = (ULONGLONG)ms - held;
         }
 
         /* 日志：状态变化 / 前台窗口变化 / 每 500ms 心跳各记一行。
@@ -441,11 +521,13 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             }
             if (stateChanged || fgChanged || now - lastLog >= 500) {
                 lastLog = now;
-                DbgLog(L"state=%s want=%d caret=%s(%d,%d,w=%d,h=%d,d=%d) src=%s fs=%d gate=%d to=%d | "
+                DbgLog(L"state=%s want=%d caret=%s(%d,%d,w=%d,h=%d,d=%d) src=%s fs=%d comp=%d gate=%d to=%d "
+                       L"ah=%s ttl=%I64u | "
                        L"opened=%d conv=0x%X ok=%d strat=%d nb=%d | %s",
                        StateName(cur), want, got ? L"hit" : L"miss",
                        cp.x, cp.y, cp.w, cp.h, cp.depth, SrcName(cp.source),
-                       CaretIsForegroundFullscreen(), settleGate, caretTimedOut,
+                       CaretIsForegroundFullscreen(), occluded, settleGate, caretTimedOut,
+                       transient ? L"temp" : L"keep", (unsigned long long)ahLeft,
                        pr.opened, (DWORD)pr.conv, pr.ok, pr.strategy, pr.nonBinary,
                        fg);
             }
