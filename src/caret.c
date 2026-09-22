@@ -283,7 +283,14 @@ static int ViaMsaa(CaretPos* out) {
         LogChFail(L"msaa", L"accLocation returned (0,0,0,0)", 0);
         return 0;
     }
-    out->x = (int)x; out->y = (int)y; out->h = (int)h;
+    if (w <= 0) {   /* 零宽"光标"：真实插入条至少 1px 宽。QQ（CEF）实测在焦点
+                       不在输入框时 OBJID_CARET 报 (x,y,0,h) 的残留假数据 ——
+                       且 QQ 的焦点元素没有 TextPattern，UIA 闸门拦不到它，
+                       不在这里拒掉，圆点就钉在没有输入框的位置。 */
+        LogChFail(L"msaa", L"accLocation returned zero-width caret", 0);
+        return 0;
+    }
+    out->x = (int)x; out->y = (int)y; out->w = (int)w; out->h = (int)h;   /* ★ w 之前漏赋值，日志里 msaa 的 w 恒 0 */
     return 1;   /* 其余合理性由 CaretProbeOnce 的 TRY_CHANNEL 统一过滤（这样 reject 日志才打得出） */
 }
 
@@ -433,7 +440,17 @@ static int ViaUiaCaretRange(CaretPos* out) {
                 int editable = active ? 0
                                       : (OwnerIsEditable(el) ||
                                          (focus && OwnerIsEditable(focus)));
-                if (active || editable) {
+                /* ★ 焦点元素离屏（IsOffscreen）时 caret 必然不可见：QQ 实测，
+                   从编辑器切到 QQ 时 DOM 焦点残留在上次会话的输入框（用户眼中
+                   "没有输入框"），闸门见 Edit 就放行，MSAA 紧接着报出残留坐标
+                   —— 圆点钉在没有输入框的位置。离屏 ⇒ 不显示，也顺带覆盖
+                   最小化窗口的场景。 */
+                BOOL focusOff = FALSE;
+                if (focus && FAILED(focus->get_CurrentIsOffscreen(&focusOff)))
+                    focusOff = FALSE;
+                if (focusOff) {
+                    ok = -1;
+                } else if (active || editable) {
                     ok = RectViaRange(out, range, L"uia_caret") ? 1 : 0;
                 } else {
                     ok = -1;   /* 焦点不在文本里 */
