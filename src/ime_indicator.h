@@ -106,7 +106,7 @@ typedef struct {
 
 int    ImeIsChineseModeEx(ImeProbe* p);  /* p 可为 NULL：同 ImeIsChineseMode */
 void   ImeSetForcedStrategy(int s);      /* 0=自动 1=open 状态 2=转换模式   */
-int    ImeFloatOccluding(HWND focus); /* 焦点线程上是否出现打字浮窗（组合/候选） */
+int    ImeFloatOccluding(HWND focus, const RECT* nearDot); /* 焦点线程上是否出现打字浮窗；nearDot=光标大致位置（可 NULL） */
 
 /* ---- caret.c ---- */
 /* 本次坐标由哪条通道提供（日志诊断漂移用） */

@@ -292,25 +292,31 @@ int ImeIsEnglishKeyboard(void) {
 }
 
 /* ---------- 通用浮窗打字检测 ----------
-   输入法窗口类名各家不同（微软拼音 MSCTFIME Composition、搜狗 SoPY_Comp、
-   QQ拼音/百度又是别的），维护类名白名单永远追不完。改用与类名解耦的通用规则：
-   **焦点线程上出现可见的"不抢焦点"浮动窗 = 正在打字**。输入法的组合窗/候选窗
-   （不论跟随光标还是固定位置、横排竖排）都是 WS_EX_TOPMOST / WS_EX_NOACTIVATE
-   浮动窗，出现即说明输入法正在组织输入。
-   排除项（防止常驻浮窗把圆点永久藏住）：
-     - 焦点窗口的根窗口（正常交互窗口）；
-     - 会抢焦点的普通窗口（无 TOPMOST/NOACTIVATE）；
-     - WS_EX_TRANSPARENT 穿透窗；
-     - 已知输入法 UI 类名（kImeUiClass）直接命中，兜底样式特殊的实现。
+   实测（自建窗口逐个输入法打字采样）各家的组合/候选窗：
+     - 搜狗拼音 SoPY_Comp、搜狗五笔 SoWB_Comp、冰凌候选窗、小狼毫候选窗
+       （ATL 动态类名）：带 TOPMOST 一类浮动样式；
+     - 百度组合窗（类名与它的常驻工具栏同为 BAIDU_CLASS_IME_*）：同样浮动样式；
+     - 豆包/清风（及微软拼音等走 TSF→IMM32 兼容层的）组合窗
+       MSCTFIME Composition 样式为 0，抓不到样式特征，只能按类名兜底。
+   两条判定（命中其一即视为正在输入）：
+     1. 类名在 kImeUiClass 里 —— 这些类名只在组合/候选期出现，位置不论；
+     2. 浮动样式（TOPMOST|NOACTIVATE，非穿透）**且**与光标附近区域相交 ——
+        组合/候选窗都在光标旁出现；而百度/搜狗五笔/冰凌的常驻悬浮工具栏
+        就挂在焦点线程上，没有位置约束会把圆点永久藏住。
    EnumThreadWindows 不发跨进程消息，不占卡顿预算。 */
+#define IME_NEAR_RADIUS 64   /* 光标位置外扩半径：容纳组合窗相对光标的小偏移 */
 static const WCHAR* const kImeUiClass[] = {
-    L"MSCTFIME Composition",   /* 微软拼音 */
-    L"SoPY_Comp",              /* 搜狗：组合窗/候选窗 */
-    L"SoPY_Hint",              /* 搜狗：光标旁小提示窗 */
+    L"MSCTFIME Composition",   /* TSF→IMM32 兼容组合窗（微软拼音/豆包/清风等） */
+    L"SoPY_Comp",              /* 搜狗拼音：组合窗/候选窗 */
+    L"SoPY_Hint",              /* 搜狗拼音：光标旁小提示窗 */
+    L"SoWB_Comp",              /* 搜狗五笔：组合窗/候选窗 */
+    L"Iime_Candidate_Window",  /* 冰凌：候选窗 */
 };
 
 static HWND  g_focusRoot;
 static int   g_occluded;
+static RECT  g_near;         /* 光标附近区域（nearDot 外扩），通用规则要求相交 */
+static int   g_hasNear;      /* 0=调用方没给光标位置，退回"只看样式" */
 
 static BOOL CALLBACK OccludingEnum(HWND hw, LPARAM lp) {
     (void)lp;
@@ -325,16 +331,28 @@ static BOOL CALLBACK OccludingEnum(HWND hw, LPARAM lp) {
     DWORD ex = (DWORD)GetWindowLongPtrW(hw, GWL_EXSTYLE);
     if (!(ex & (WS_EX_TOPMOST | WS_EX_NOACTIVATE))) return TRUE;
     if (ex & WS_EX_TRANSPARENT) return TRUE;
-    g_occluded = 1;   /* 焦点线程上的打字浮窗：不论位置在哪，正在输入 */
+    if (g_hasNear) {
+        RECT rc, isec;
+        if (!GetWindowRect(hw, &rc)) return TRUE;
+        if (!IntersectRect(&isec, &rc, &g_near)) return TRUE;
+    }
+    g_occluded = 1;   /* 焦点线程上光标旁的打字浮窗：正在输入 */
     return FALSE;
 }
 
-int ImeFloatOccluding(HWND focus) {
+int ImeFloatOccluding(HWND focus, const RECT* nearDot) {
     if (!focus) return 0;
     DWORD tid = GetWindowThreadProcessId(focus, NULL);
     if (!tid) return 0;
     g_focusRoot = GetAncestor(focus, GA_ROOT);
     if (!g_focusRoot) g_focusRoot = focus;
+    if (nearDot && nearDot->right > nearDot->left && nearDot->bottom > nearDot->top) {
+        g_near = *nearDot;
+        InflateRect(&g_near, IME_NEAR_RADIUS, IME_NEAR_RADIUS);
+        g_hasNear = 1;
+    } else {
+        g_hasNear = 0;
+    }
     g_occluded = 0;
     EnumThreadWindows(tid, OccludingEnum, 0);
     return g_occluded;

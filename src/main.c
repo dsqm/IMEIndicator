@@ -444,13 +444,21 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
            "状态未定"期间同样不显示：宁可这段短暂没有点，也不要先亮错颜色再消失。 */
         int want = (!settleGate) && (StateColor(cur) != IME_COLOR_NONE);
 
-        /* 浮窗打字检测：输入法组合窗/候选窗（不论跟随光标还是固定位置）都是
-           "不抢焦点的浮动窗"，在焦点线程上出现即说明正在输入，圆点让位。
-           与输入法类名解耦（各家类名不同，白名单追不完）。want 已是 0 时不查。 */
+        /* 浮窗打字检测：输入法组合窗/候选窗出现即让位。两条判据：
+           纯组合期类名（白名单）直判；其余浮动样式窗要求在光标附近 ——
+           百度/搜狗五笔/冰凌的常驻悬浮工具栏也挂在焦点线程上，不能误伤。
+           want 已是 0 时不查。 */
         int occluded = wasOccl;     /* 本拍没查（want=0）时沿用上一拍，边沿判定才连续 */
         if (want && g_cfg.hideComposition) {
             HWND f = ImeFocusedWindow();
-            occluded = (f && ImeFloatOccluding(f));
+            RECT nd, *nearDot = NULL;
+            if (haveLastCp) {       /* 用上一拍光标位置：组合窗总在光标旁出现 */
+                nd.left = lastCp.x;             nd.top = lastCp.y;
+                nd.right = nd.left + (lastCp.w > 0 ? lastCp.w : 1);
+                nd.bottom = nd.top + (lastCp.h > 0 ? lastCp.h : 1);
+                nearDot = &nd;
+            }
+            occluded = (f && ImeFloatOccluding(f, nearDot));
             if (occluded) want = 0;
         }
         if (!occluded && wasOccl) occlEndAt = now;   /* 遮挡结束：上屏或取消 */
