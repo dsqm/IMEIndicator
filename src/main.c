@@ -480,13 +480,25 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
         if (got) {
             int moved = !haveLastCp || cp.x != lastCp.x || cp.y != lastCp.y || cp.h != lastCp.h;
             if (moved) {
-                lastCp = cp;
-                haveLastCp = 1;
                 /* 遮挡期间与遮挡结束后短宽限内的光标移动不续命：那是输入法的
                    自动行为（组合串增长推着 caret 走、上屏让 caret 前跳），不是
                    用户在动。位置照常更新，圆点该藏就藏、该停就停，不闪。 */
                 int inGrace = occluded ||
                               (occlEndAt && now - occlEndAt < (ULONGLONG)IME_COMMIT_GRACE_MS);
+                /* 小位移过滤：中文标点（，。？）被输入法**直接上屏**，不产生组合
+                   窗 —— 浮窗检测和上屏宽限都盖不到，caret 只前进一两个字符位。
+                   切比雪夫距离 ≤ 2×行高（h≈字格）的移动视为输入的直接结果，
+                   不续命；副作用是方向键挪一格、点击相邻位置也不触发（已确认
+                   接受：小幅移动不需要提示）。 */
+                if (!inGrace && haveLastCp) {
+                    long dx = cp.x - lastCp.x, dy = cp.y - lastCp.y;
+                    if (dx < 0) dx = -dx;
+                    if (dy < 0) dy = -dy;
+                    long cell = cp.h > 0 ? cp.h : lastCp.h;
+                    if (cell > 0 && dx <= 2 * cell && dy <= 2 * cell) inGrace = 1;
+                }
+                lastCp = cp;
+                haveLastCp = 1;
                 if (!inGrace) ahAt = now;
             }
         } else {
