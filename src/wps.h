@@ -12,4 +12,8 @@ int WpsCaretText(CaretPos* out);   /* 文字 wps.exe：Word 对象模型 GetPoin
 int WpsCaretShow(CaretPos* out);   /* 演示 wpp.exe：PowerPoint 模型 + 点→像素换算  */
 int WpsCaretGrid(CaretPos* out);   /* 表格 et.exe：Excel 模型 ActiveCell + 比例换算 */
 
+/* 降权桥子进程用：吃一帧"查哪条通道"的请求，回一帧"结果 + 矩形"。
+   （本进程提权、WPS 普通权限时，上面三个函数会自己把活转给桥。） */
+BOOL WpsBridgeHandler(const BYTE* req, DWORD reqLen, BYTE** resp, DWORD* respLen);
+
 #endif /* WPS_CARET_H */

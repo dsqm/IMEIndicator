@@ -1,5 +1,7 @@
 #include "ime_indicator.h"
 #include "version.h"    /* 构建脚本按当前日期生成（版本号 = 编译日期） */
+#include "bridge.h"     /* 降权桥：管理员时替本进程跑 WPS 的 COM 查询 */
+#include "wps.h"        /* WpsBridgeHandler：桥子进程的请求处理 */
 #include <stdlib.h>  /* calloc / free */
 #include <stdio.h>   /* _snwprintf_s */
 #include <wchar.h>   /* wcscmp */
@@ -570,15 +572,30 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
                    _In_ LPSTR lpCmd, _In_ int nShow) {
     (void)hInst; (void)hPrev; (void)lpCmd; (void)nShow;
 
-    if (!SingleInstanceAcquire()) return 0;   /* 已有一个实例在跑，直接退出 */
-
-    g_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
-    SetDpiAwareness();          /* 必须最早 */
+    SetDpiAwareness();          /* 必须最早（桥子进程也要：它算的是屏幕物理像素） */
     DbgInit();
 
     /* --log：启动即开日志，省得先去托盘点一下（排查"日志不生成"时用它） */
     const WCHAR* cmdline = GetCommandLineW();
     if (cmdline && wcsstr(cmdline, L"--log")) InterlockedExchange(&g_logging, 1);
+
+    /* --bridge <父pid> <序号>：降权桥子进程。不建托盘、不建浮窗、不抢单例
+       —— 它只是"普通权限的自己"，替管理员父进程跑 WPS 的 COM 查询（ROT 按
+       完整性级别隔离，父进程自己附不上，见 bridge.c 文件头）。 */
+    DWORD bpid = 0, bseq = 0;
+    if (BrParseChildSwitch(&bpid, &bseq)) {
+        ZeroMemory(&g_cfg, sizeof(g_cfg));
+        CfgLoad(&g_cfg);                 /* 只要 wpsCom 开关（用户关了就别查） */
+        HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+        int rc = BrServe(bpid, bseq, WpsBridgeHandler);
+        if (SUCCEEDED(hr)) CoUninitialize();
+        DbgShutdown();
+        return rc;
+    }
+
+    if (!SingleInstanceAcquire()) return 0;   /* 已有一个实例在跑，直接退出 */
+
+    g_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
     ZeroMemory(&g_cfg, sizeof(g_cfg));
     CfgLoad(&g_cfg);            /* 缺配置时在 exe 同目录生成模板 */
@@ -607,6 +624,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     WaitForSingleObject(th, 1000);
     CloseHandle(th);
     CaretWorkerStop();                     /* 检测线程已退出，此时回收查询线程 */
+    BrShutdown();                          /* 通知降权桥子进程收工（它也会自己看父进程） */
     TrayRemove();
     OverlayShutdown();
     SingleInstanceRelease();

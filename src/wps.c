@@ -23,6 +23,7 @@
 
 #include "ime_indicator.h"
 #include "wps.h"
+#include "bridge.h"     /* 管理员 + WPS 普通权限时，COM 查询交给降权桥（见下） */
 
 #include <oleauto.h>
 
@@ -307,6 +308,65 @@ static int WpsAttach(WpsChan* c) {
     return 1;
 }
 
+/* ---------- 降权桥：管理员进程取不到 ROT 时的退路 ----------
+   ROT 按完整性级别隔离 → 本进程提权时永远附不上普通权限的 WPS（见文件头）。
+   这时把整条查询交给"普通权限的自己"（bridge.c 拉起的子进程）：那边跑的就是
+   下面这三个函数，COM 照常工作，坐标经管道送回来。协议只有
+   "通道号 -> 结果 + 矩形"（结果沿用本地的 1 / 0 / -1 三态）。 */
+#define WPS_CH_WR  1
+#define WPS_CH_PP  2
+#define WPS_CH_ET  3
+#define WPS_BR_WAIT_MS 120   /* 等桥一帧应答的上限（子进程查询实测 2~8ms） */
+
+static int WpsBridgeQuery(int ch, CaretPos* out) {
+    if (!BrEnsure()) return -1;                 /* 桥还没起来（首轮正在拉进程） */
+    LONG req = (LONG)ch;
+    BYTE* buf = NULL;
+    DWORD n = 0;
+    if (!BrCall((const BYTE*)&req, sizeof(req), &buf, &n, WPS_BR_WAIT_MS)) {
+        BrDrop();
+        return -1;
+    }
+    if (n < sizeof(LONG) * 5) { free(buf); BrDrop(); return -1; }   /* 协议不符 */
+    LONG* r = (LONG*)buf;
+    int rc = (int)r[0];
+    if (rc == 1) {
+        out->x = (int)r[1]; out->y = (int)r[2];
+        out->h = (int)r[3]; out->w = (int)r[4];
+    }
+    free(buf);
+    return rc;
+}
+
+/* 附着失败时的退路。★ 只在"根本没附上"且本进程提权时才转桥：附着成功说明
+   COM 是通的（同一完整性级别），失败属于没文档/没光标之类，桥也帮不上；
+   本进程没提权时更是本地就能查（子进程一样是普通权限，白绕一趟）。 */
+static int WpsBridgeFallback(WpsChan* c, int ch, CaretPos* out) {
+    if (c->app || !ProcIsElevated()) return -1;
+    return WpsBridgeQuery(ch, out);
+}
+
+/* 桥子进程的请求处理（main.c 的 --bridge 入口接它）：跑本地 COM 查询，把
+   "结果 + 矩形"回给父进程。子进程是普通权限 → 这里不会再转到桥。 */
+BOOL WpsBridgeHandler(const BYTE* req, DWORD reqLen, BYTE** resp, DWORD* respLen) {
+    LONG ch = 0;
+    if (reqLen >= sizeof(LONG)) memcpy(&ch, req, sizeof(ch));
+    CaretPos cp;
+    ZeroMemory(&cp, sizeof(cp));
+    int r = 0;
+    if (ch == WPS_CH_WR)      r = WpsCaretText(&cp);
+    else if (ch == WPS_CH_PP) r = WpsCaretShow(&cp);
+    else if (ch == WPS_CH_ET) r = WpsCaretGrid(&cp);
+    LONG o[5];
+    o[0] = (LONG)r; o[1] = (LONG)cp.x; o[2] = (LONG)cp.y;
+    o[3] = (LONG)cp.h; o[4] = (LONG)cp.w;
+    *resp = (BYTE*)malloc(sizeof(o));
+    if (!*resp) return FALSE;
+    memcpy(*resp, o, sizeof(o));
+    *respLen = (DWORD)sizeof(o);
+    return TRUE;
+}
+
 /* 节流期内复用上次结果。返回 1=已给出结论（out 可能已填好，也可能是"没光标"），
    0=不节流、调用方该去真查。 */
 static int WpsThrottled(WpsChan* c, CaretPos* out) {
@@ -382,7 +442,7 @@ int WpsCaretText(CaretPos* out) {
     }
     int thr = WpsThrottled(&g_wr, out);
     if (thr) return thr;
-    if (!WpsAttach(&g_wr) || !WrNav(&g_wr)) return -1;
+    if (!WpsAttach(&g_wr) || !WrNav(&g_wr)) return WpsBridgeFallback(&g_wr, WPS_CH_WR, out);
     IDispatch* rng = WpsPropDisp(g_wr.sel, g_wrIdRange);
     if (!rng) {
         LogChFail(g_wr.tag, L"Selection.Range failed", 0);
@@ -693,7 +753,7 @@ int WpsCaretShow(CaretPos* out) {
        编辑态由 Selection.Type 把关，见下面。 */
     int thr = WpsThrottled(&g_pp, out);
     if (thr) return thr;
-    if (!WpsAttach(&g_pp) || !PpNav(&g_pp)) return -1;
+    if (!WpsAttach(&g_pp) || !PpNav(&g_pp)) return WpsBridgeFallback(&g_pp, WPS_CH_PP, out);
 
     ULONGLONG now = GetTickCount64();
     double ty = -1;
@@ -767,7 +827,7 @@ int WpsCaretGrid(CaretPos* out) {
     if (!WpsIsForeground(&g_et, &fg)) return 0;
     int thr = WpsThrottled(&g_et, out);
     if (thr) return thr;
-    if (!WpsAttach(&g_et)) return -1;
+    if (!WpsAttach(&g_et)) return WpsBridgeFallback(&g_et, WPS_CH_ET, out);
 
     ULONGLONG now = GetTickCount64();
     if (!g_et.win) {
