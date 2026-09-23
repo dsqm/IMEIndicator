@@ -118,6 +118,18 @@ static const CfgUpgrade kUpgrades[] = {
       "; all = 全部状态都临时显示，none = 全部维持常显。\n"
       "; ★ 色值写 0 的状态始终不显示，这条优先于名单。\n"
       "AutoHideStates = Cn\n" },
+    { "WpsCom",
+      "[General]",
+      ";\n"
+      "; WPS（wps.exe / wpp.exe / et.exe）的光标对标准接口全不可见：自身不用 Win32\n"
+      "; 光标、无 MSAA caret、无 UIA 文本、走 TSF 不走 IMM；演示还会报出屏幕原点上\n"
+      "; 的 1×1 假光标（MSAA 也照抄那份）。只能走它抄自 Office 的对象模型：\n"
+      "; 文字 = Selection.Range + ActiveWindow.GetPoint；演示 = 把 Selection.TextRange\n"
+      "; 追到 TextFrame.TextRange，按插入点取逐字符框 Bound*（空文本框退回 Font.Size\n"
+      "; 当行高，插入点取段落左缘）；表格 = ActiveCell 的 Left/Top/Height +\n"
+      "; PointsToScreenPixels(0) + DPI×Zoom 比例（PTS 的跨度是 1:1，不能用），圆点\n"
+      "; 放在当前格左缘；0 = 关掉这条通道（WPS 里就不会显示圆点）。\n"
+      "WpsCom = 1\n" },
 };
 
 /* buf 里找裸键名（行首可有空白，键名后跟空白或'='，避免撞上别的单词） */
@@ -316,6 +328,7 @@ void CfgLoad(ImeCfg* c) {
     c->shape=SHAPE_CIRCLE;
     c->autoHideMs=1000;                    /* 临时显示时长 */
     c->autoHideMask=(int)IME_AH_BIT(IMEST_CN);  /* 默认只有中文态临时显示 */
+    c->wpsCom=1;                           /* WPS 文字/演示走 Office 对象模型取光标 */
 
     /* 旧配置文件里缺新参数时先补写（本次启动就能读到新键） */
     UpgradeIniFile(path);
@@ -355,6 +368,16 @@ void CfgLoad(ImeCfg* c) {
             "; all = 全部状态都临时显示，none = 全部维持常显。\n"
             "; ★ 色值写 0 的状态始终不显示，这条优先于名单。\n"
             "AutoHideStates = Cn\n"
+            ";\n"
+            "; WPS（wps.exe / wpp.exe / et.exe）的光标对标准接口全不可见：自身不用 Win32\n"
+            "; 光标、无 MSAA caret、无 UIA 文本、走 TSF 不走 IMM；演示还会报出屏幕原点上\n"
+            "; 的 1×1 假光标（MSAA 也照抄那份）。只能走它抄自 Office 的对象模型：\n"
+            "; 文字 = Selection.Range + ActiveWindow.GetPoint；演示 = 把 Selection.TextRange\n"
+            "; 追到 TextFrame.TextRange，按插入点取逐字符框 Bound*（空文本框退回 Font.Size\n"
+            "; 当行高，插入点取段落左缘）；表格 = ActiveCell 的 Left/Top/Height +\n"
+            "; PointsToScreenPixels(0) + DPI×Zoom 比例（PTS 的跨度是 1:1，不能用），圆点\n"
+            "; 放在当前格左缘；0 = 关掉这条通道（WPS 里就不会显示圆点）。\n"
+            "WpsCom = 1\n"
             ";\n"
             "[Colors]\n"
             "; 颜色格式固定 #RRGGBB（6 位十六进制，必须带 #）；透明度一律用下面的 Alpha\n"
@@ -435,6 +458,7 @@ void CfgLoad(ImeCfg* c) {
                                     else if (ISAME(kb,"carettimeoutms")) c->caretTimeoutMs=ParseIntA(vb,150,20,5000);
                                     else if (ISAME(kb,"autohidems")) c->autoHideMs=ParseIntA(vb,1000,0,60000);
                                     else if (ISAME(kb,"autohidestates")) c->autoHideMask=ParseStatesA(vb,c->autoHideMask);
+                                    else if (ISAME(kb,"wpscom")) c->wpsCom=ParseIntA(vb,1,0,1);
                                 } else if (sec==1 && eq) {
                                     *eq=0;
                                     WCHAR k[CFG_NAME_MAX], v[128];

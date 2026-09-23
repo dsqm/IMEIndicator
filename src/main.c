@@ -257,6 +257,9 @@ static const WCHAR* SrcName(CaretSource s) {
     case CARET_UIA_CARET: return L"uia_caret";
     case CARET_UIA_SEL:   return L"uia_sel";
     case CARET_IME:       return L"ime";
+    case CARET_WPS:       return L"wps";
+    case CARET_WPP:       return L"wpp";
+    case CARET_ET:        return L"et";
     default:              return L"none";
     }
 }

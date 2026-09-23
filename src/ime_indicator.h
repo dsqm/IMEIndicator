@@ -51,6 +51,7 @@ typedef struct {
     int          autoHideMs;    /* "临时显示"时长(ms)：清单里的状态只显示这么久
                                     就自动消失；0=不用临时显示（全部常显）      */
     int          autoHideMask;  /* 参与临时显示的状态集合：1<<ImeState 位掩码    */
+    int          wpsCom;        /* 1=WPS 文字走 Word 对象模型（COM）取光标位置    */
 } ImeCfg;
 
 /* 换窗口后，向 IME 问到的仍是**上一个窗口**的值（实测滞后 200~300ms）。
@@ -116,12 +117,21 @@ typedef enum {
     CARET_MSAA,      /* MSAA OBJID_CARET accLocation */
     CARET_UIA_CARET, /* UIA TextPattern2::GetCaretRange */
     CARET_UIA_SEL,   /* UIA TextPattern::GetSelection */
-    CARET_IME        /* IME 组合窗口 */
+    CARET_IME,       /* IME 组合窗口 */
+    CARET_WPS,       /* WPS 文字：Word 对象模型 GetPoint（见 wps.c） */
+    CARET_WPP,       /* WPS 演示：PowerPoint 对象模型 Bound* + 点→像素（见 wps.c） */
+    CARET_ET         /* WPS 表格：Excel 对象模型 ActiveCell + 点→像素（见 wps.c） */
 } CaretSource;
 typedef struct { int x, y, h, w; int found; int depth; CaretSource source; } CaretPos;
 /* w 与 depth 只是**诊断信息**（w=矩形宽、depth=文本模式在焦点链上的层数，-1=该通道
    没有这个概念）：把点摆到"行首"这类漂移，只能靠"宽得像整行"与"模式来自祖先文档"
    这两个线索分辨，所以随日志一起打出来。 */
+
+/* caret.c 与 wps.c（WPS COM 通道）共用的检测设施 */
+void   LogChFail(const WCHAR* ch, const WCHAR* why, HRESULT hr); /* 通道失败日志（1 秒节流） */
+UINT   WindowDpi(HWND hwnd);      /* 窗口 DPI（GetDpiForWindow，取不到回 0）       */
+UINT   MonitorDpi(HWND hwnd);     /* 显示器 DPI（GetDpiForMonitor，兜底主屏 96）  */
+extern volatile LONG g_gen;       /* 查询线程代际（重建 +1；wps.c 换代时丢 COM 代理） */
 
 /* ---- caret.c ----
    光标查询会**跨进程**调 UIA/MSAA，这些调用没有任何超时机制：前台程序

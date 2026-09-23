@@ -1,4 +1,5 @@
 #include "ime_indicator.h"
+#include "wps.h"
 
 #include <uiautomationclient.h>
 #include <oleauto.h>
@@ -6,6 +7,9 @@
 
 /* ================= 光标位置检测（多级策略） =================
    顺序（见 CaretProbeOnce 里的 TRY_CHANNEL 链）：
+   0) WPS 系（拆到 wps.c：文字走 Word、演示走 PowerPoint 的对象模型 COM；
+      它们的标准接口全不可见，演示还会报出屏幕原点上的假光标，所以必须
+      抢在最前面）；
    1) GUI 线程 caret 矩形（GetGUIThreadInfo，经典 Win32 编辑器）；
    2) UIA TextPattern2::GetCaretRange（VS Code 等现代编辑器）；
    3) MSAA OBJID_CARET accLocation（Chromium 系的兜底）；
@@ -15,6 +19,10 @@
    这些调用都是**跨进程**的且没有超时参数 → 整条链跑在查询线程里（文件末尾）。 */
 
 static IUIAutomation* g_uia = NULL;
+/* worker 代际：重建 +1，旧代见之即退（声明在 ime_indicator.h —— wps.c 的
+   WPS 通道也要看它：换代后必须丢掉上一代拿到的 COM 代理，见 wps.c 的
+   WpsAttach）。 */
+volatile LONG g_gen = 0;
 /* 树遍历器：IUIAutomation 活着期间内容不变，取一次缓存住即可。原来每次探测
    取一对、用完 Release，66Hz 下就是每秒 132 次白做的 COM 调用。与 g_uia
    同生共死（换代重建时一起置 NULL，理由同 g_uia）。 */
@@ -46,7 +54,7 @@ static void EnsureUia(void) {
 /* 通道失败原因日志：1 秒节流（"没有光标"是常态，不能刷屏）。
    之前 UIA/MSAA 失败全部静默 → 用户日志里只见 caret=miss src=none，
    看不出是哪条路、为什么死。 */
-static void LogChFail(const WCHAR* ch, const WCHAR* why, HRESULT hr) {
+void LogChFail(const WCHAR* ch, const WCHAR* why, HRESULT hr) {
     static ULONGLONG last = 0;
     static WCHAR lastWhy[128] = L"";
     ULONGLONG now = GetTickCount64();
@@ -155,7 +163,7 @@ static int FocusIsContextMenu(void) {
 typedef UINT (WINAPI* PFN_GETDPIFORWINDOW)(HWND);
 typedef HRESULT (WINAPI* PFN_GETDPIFORMONITOR)(HMONITOR, int, UINT*, UINT*);
 
-static UINT WindowDpi(HWND hwnd) {
+UINT WindowDpi(HWND hwnd) {
     static PFN_GETDPIFORWINDOW fn = NULL;
     static int tried = 0;
     if (!tried) {
@@ -167,7 +175,7 @@ static UINT WindowDpi(HWND hwnd) {
     return fn(hwnd);
 }
 
-static UINT MonitorDpi(HWND hwnd) {
+UINT MonitorDpi(HWND hwnd) {
     static PFN_GETDPIFORMONITOR fn = NULL;
     static int tried = 0;
     if (!tried) {
@@ -186,6 +194,10 @@ static UINT MonitorDpi(HWND hwnd) {
     if (hdc) ReleaseDC(NULL, hdc);
     return d ? d : 96;
 }
+
+/* 方法0：WPS 系（文字/演示/表格的 COM 通道）拆在 src/wps.c —— 那边自带
+   全部实测注释与三条通道的实现，这里只按顺序调用（见下方 TRY_CHANNEL）。 */
+
 
 /* 方法1：前台线程的 caret 矩形（GetGUIThreadInfo 可跨进程读） */
 static int ViaGuiInfo(CaretPos* out) {
@@ -573,6 +585,9 @@ static const WCHAR* CaretSrcName(CaretSource s) {
     case CARET_UIA_CARET: return L"uia_caret";
     case CARET_UIA_SEL:   return L"uia_sel";
     case CARET_IME:       return L"ime";
+    case CARET_WPS:       return L"wps";
+    case CARET_WPP:       return L"wpp";
+    case CARET_ET:        return L"et";
     default:              return L"none";
     }
 }
@@ -623,11 +638,17 @@ static int CaretProbeOnce(CaretPos* out) {
         LogNoCaret(L"context menu focused");
         goto done;
     }
+    /* WPS 系排在最前：它们的 guiinfo/UIA/MSAA/IMM 四条路全不通（见文件头），
+       后面那些跑一遍纯属白付跨进程开销，而这条路一次就够。演示那条还必须抢在
+       guiinfo 之前 —— 它的 guiinfo 报的是屏幕原点上的 1×1 假光标。 */
+    TRY_CHANNEL(WpsCaretText, CARET_WPS, L"wps: no caret rect");
+    TRY_CHANNEL(WpsCaretShow, CARET_WPP, L"wpp: no caret rect");
+    TRY_CHANNEL(WpsCaretGrid, CARET_ET, L"et: no caret rect");
+    TRY_CHANNEL(ViaGuiInfo, CARET_GUIINFO, L"guiinfo: no caret hwnd");
     /* UIA caret 排在 MSAA 之前，职责是**把关**：判定"焦点在不在可编辑控件"
        （不在 → -1，整条链停，MSAA 的陈旧坐标就没机会出来），并只在自己能给
        出"正常字符格"时提供坐标；细条/空/宽块一律返回 0 落到 MSAA 的 1px
        光标条 —— Chromium 系实测 MSAA 比 UIA 的文本范围准。 */
-    TRY_CHANNEL(ViaGuiInfo, CARET_GUIINFO, L"guiinfo: no caret hwnd");
     TRY_CHANNEL(ViaUiaCaretRange, CARET_UIA_CARET,
                 L"uia_caret: inactive caret outside an editable control");
     TRY_CHANNEL(ViaMsaa, CARET_MSAA, L"msaa: no caret object");
@@ -666,7 +687,6 @@ static HANDLE          g_ackEv = NULL;    /* 查询线程 -> 检测线程：结�
 static HANDLE          g_workerTh = NULL;
 static volatile LONG   g_reqSeq = 0;
 static volatile LONG   g_ackSeq = 0;
-static volatile LONG   g_gen = 0;         /* worker 代际：重建 +1，旧代见之即退 */
 static int             g_timeoutMs = CARET_DEFAULT_TIMEOUT_MS;
 static CaretPos        g_result;          /* 仅查询线程写，靠序号/事件保证读时已写完 */
 
