@@ -186,9 +186,14 @@ int ImeIsChineseModeEx(ImeProbe* p) {
 
     if (!skip && ok && !g_forced) {
         int openedChanged = (opened != g_s.lastOpened);
-        int convChanged   = (conv != g_s.lastConv);
+        /* ★ 只认 NATIVE 位（中/英）有没有变，不看整个 conv：切全角也会翻 conv 的
+           其他位（微软拼音 0x401 ↔ 0x409），按整个值判的话，按一下 Shift+Space
+           就会被当成"conv 才是权威信号"，把策略从 open 拽到 conv，中英判定跟着
+           跑偏；还会平白触发一轮 200ms 稳定等待。 */
+        int convChanged   = ((conv ^ g_s.lastConv) & IME_CMODE_NATIVE) != 0;
         if (openedChanged || convChanged) {
-            long long key = (((long long)opened) << 32) | (long long)(DWORD)conv;
+            long long key = (((long long)opened) << 32)
+                          | (long long)(DWORD)(conv & IME_CMODE_NATIVE);
             if (key != g_s.pendingKey) {
                 g_s.pendingKey = key;
                 g_s.pendingTime = now;
