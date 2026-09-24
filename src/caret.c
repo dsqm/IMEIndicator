@@ -139,6 +139,25 @@ static int OwnerIsEditable(IUIAutomationElement* el) {
     return ct == UIA_EditControlTypeId;
 }
 
+/* uia_sel 通道的兜底采信条件：范围持有者（或焦点元素）得是**能打字**的文本容器。
+   光认 Edit 会误杀 Chromium 的 contenteditable（ControlType 是 Document 但
+   IsReadOnly=FALSE），加后者兜住。只在范围级 IsReadOnly 属性取不到时才用。 */
+static int ElemIsWritableText(IUIAutomationElement* el) {
+    if (!el) return 0;
+    int ct = 0;
+    if (FAILED(el->get_CurrentControlType(&ct))) return 0;
+    if (ct == UIA_EditControlTypeId) return 1;
+    if (ct != UIA_DocumentControlTypeId) return 0;
+    VARIANT v;
+    VariantInit(&v);
+    int wr = 0;
+    if (SUCCEEDED(el->GetCurrentPropertyValue(UIA_ValueIsReadOnlyPropertyId, &v))) {
+        wr = (v.vt == VT_BOOL && v.boolVal != VARIANT_FALSE);
+        VariantClear(&v);
+    }
+    return wr;
+}
+
 /* 焦点是否在 Win32 弹出菜单（上下文菜单，类名 #32768）上。
    菜单永远没有文本光标，但原来每 15ms 仍会对菜单做 GetFocusedElement +
    两条 UIA 通道各爬 24 层祖先 + MSAA caret 查询 —— 全是对空气输出，右键
@@ -495,8 +514,7 @@ static int ViaUiaSelection(CaretPos* out) {
     }
     int depth = -1;
     IUIAutomationElement* el = UiaFindPattern(focus, FALSE, &depth);
-    focus->Release();
-    if (!el) return 0;
+    if (!el) { focus->Release(); return 0; }
     out->depth = depth;
     int ok = 0;
     IUnknown* pat = NULL;
@@ -508,20 +526,43 @@ static int ViaUiaSelection(CaretPos* out) {
                 int n = 0;
                 if (SUCCEEDED(sel->get_Length(&n)) && n >= 1) {
                     IUIAutomationTextRange* range = NULL;
-                    /* 取**最后一个**选区。★ 只认**折叠**的（Start==End=真插入点）：
-                       非折叠说明用户在拖选 —— 无光标的程序（QQ 聊天窗实测）这时
-                       GetSelection 给的是整个选区，折叠到 End 再取字符框就成了
-                       "选区末字的字框"，圆点钉在选区末尾。选中期间光标本来看不见，
-                       直接放弃本轮让圆点收起。端点比较失败（provider 不支持）时
-                       退回旧行为，避免误杀。 */
+                    /* 取**最后一个**选区，过两道闸门（都源自 QQ 聊天窗实测）：
+                       1) 只认**折叠**的选区（Start==End=真插入点）。非折叠说明用户
+                          在拖选 —— GetSelection 给的是整个选区，折叠到 End 再取字
+                          符框就成了"选区末字的字框"；选中期间光标本来看不见。
+                       2) 只认**可写**的文本。点击只读区域（聊天记录/网页正文）时
+                          Chromium 照样报一个折叠选区，跟拖选同源。最准的判据是文本
+                          范围自报的 IsReadOnly 属性；拿不到才退回看持有者/焦点元素
+                          （Edit，或 IsReadOnly=FALSE 的 Document——contenteditable
+                          走这条路，光认 Edit 会误杀它）。两道闸都过不了就不显示。 */
                     if (SUCCEEDED(sel->GetElement(n - 1, &range)) && range) {
                         int cmp = 0;
-                        if (FAILED(range->CompareEndpoints(
-                                TextPatternRangeEndpoint_Start, range,
-                                TextPatternRangeEndpoint_End, &cmp)) || cmp == 0) {
+                        BOOL collapsed =
+                            FAILED(range->CompareEndpoints(
+                                       TextPatternRangeEndpoint_Start, range,
+                                       TextPatternRangeEndpoint_End, &cmp)) ||
+                            cmp == 0;   /* 端点比较失败退回旧行为，避免误杀 */
+                        int readonly = -1;   /* -1 = 属性查不到，退回元素判定 */
+                        VARIANT ra;
+                        VariantInit(&ra);
+                        if (SUCCEEDED(range->GetAttributeValue(UIA_IsReadOnlyAttributeId, &ra))) {
+                            if (ra.vt == VT_BOOL)
+                                readonly = (ra.boolVal != VARIANT_FALSE);
+                            VariantClear(&ra);
+                        }
+                        int accept = collapsed &&
+                                     (readonly == 0 ||
+                                      (readonly < 0 && (ElemIsWritableText(el) ||
+                                                        ElemIsWritableText(focus))));
+                        if (accept) {
                             range->MoveEndpointByRange(TextPatternRangeEndpoint_Start,
                                                        range, TextPatternRangeEndpoint_End);
                             ok = RectViaRange(out, range, L"uia_sel");
+                        } else {
+                            LogChFail(L"uia_sel",
+                                      collapsed ? L"read-only text (click in non-editable area)"
+                                                : L"selection not collapsed (drag-selecting)",
+                                      0);
                         }
                         range->Release();
                     }
@@ -533,6 +574,7 @@ static int ViaUiaSelection(CaretPos* out) {
         pat->Release();
     }
     el->Release();
+    focus->Release();
     return ok;
 }
 
