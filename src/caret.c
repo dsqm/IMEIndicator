@@ -508,13 +508,21 @@ static int ViaUiaSelection(CaretPos* out) {
                 int n = 0;
                 if (SUCCEEDED(sel->get_Length(&n)) && n >= 1) {
                     IUIAutomationTextRange* range = NULL;
-                    /* 取**最后一个**选区并把 Start 端点挪到 End：GetSelection 给的
-                       是选区，光标只是它的一个端点，收成插入点才与"光标位置"同义
-                       （InputTip 同款：取 len-1，再 MoveEndpointByRange(Start→End)）。 */
+                    /* 取**最后一个**选区。★ 只认**折叠**的（Start==End=真插入点）：
+                       非折叠说明用户在拖选 —— 无光标的程序（QQ 聊天窗实测）这时
+                       GetSelection 给的是整个选区，折叠到 End 再取字符框就成了
+                       "选区末字的字框"，圆点钉在选区末尾。选中期间光标本来看不见，
+                       直接放弃本轮让圆点收起。端点比较失败（provider 不支持）时
+                       退回旧行为，避免误杀。 */
                     if (SUCCEEDED(sel->GetElement(n - 1, &range)) && range) {
-                        range->MoveEndpointByRange(TextPatternRangeEndpoint_Start, range,
-                                                   TextPatternRangeEndpoint_End);
-                        ok = RectViaRange(out, range, L"uia_sel");
+                        int cmp = 0;
+                        if (FAILED(range->CompareEndpoints(
+                                TextPatternRangeEndpoint_Start, range,
+                                TextPatternRangeEndpoint_End, &cmp)) || cmp == 0) {
+                            range->MoveEndpointByRange(TextPatternRangeEndpoint_Start,
+                                                       range, TextPatternRangeEndpoint_End);
+                            ok = RectViaRange(out, range, L"uia_sel");
+                        }
                         range->Release();
                     }
                 }
