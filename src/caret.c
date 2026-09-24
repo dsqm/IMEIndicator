@@ -142,6 +142,28 @@ static int OwnerIsEditable(IUIAutomationElement* el) {
 /* uia_sel 通道的兜底采信条件：范围持有者（或焦点元素）得是**能打字**的文本容器。
    光认 Edit 会误杀 Chromium 的 contenteditable（ControlType 是 Document 但
    IsReadOnly=FALSE），加后者兜住。只在范围级 IsReadOnly 属性取不到时才用。 */
+/* ★ UIA 焦点元素包含性校验（msaa / ime 通道共用）：
+   真"插入点"必落在 UIA 焦点元素的矩形内。Qt6/TSF 系应用不向系统暴露光标，
+   OBJID_CARET 报固定残留假位置、ImmGetCompositionWindow 给**系统默认位置
+   = 窗口客户区左下角**（qBittorrent / Qt6 测试台实测），都能被这道闸拦下。
+   返回 1 = 点在焦点元素外（该弃）；UIA 不可用/矩形退化时返回 0（跳过检查，
+   不破坏既有可用场景）。 */
+static int PtOutsideUiaFocus(long x, long y) {
+    if (!g_uia) return 0;
+    IUIAutomationElement* fe = NULL;
+    int outside = 0;
+    if (SUCCEEDED(g_uia->GetFocusedElement(&fe)) && fe) {
+        RECT ue;
+        if (SUCCEEDED(fe->get_CurrentBoundingRectangle(&ue)) &&
+            (ue.right > ue.left || ue.bottom > ue.top) &&
+            (x < ue.left - 4 || x > ue.right + 4 ||
+             y < ue.top - 4 || y > ue.bottom + 4))
+            outside = 1;
+        fe->Release();
+    }
+    return outside;
+}
+
 static int ElemIsWritableText(IUIAutomationElement* el) {
     if (!el) return 0;
     int ct = 0;
@@ -250,6 +272,55 @@ static int ViaGuiInfo(CaretPos* out) {
                            (unsigned long)dpiW, (unsigned long)dpiM);
                 }
             }
+            /* ★ 焦点控件包含性校验：光标点必须落在焦点控件窗口内。qBittorrent
+               （Qt6）实测只在打字（IME 组合）时才建系统光标，且矩形是**整个主
+               窗口**（w/h = 主窗口尺寸，x 还能是负数）—— 不校验的话提示会被
+               甩到窗口中部甚至别的屏幕。光标不该在焦点控件外，出格即弃。 */
+            RECT fr;
+            if (gi.hwndFocus && GetWindowRect(gi.hwndFocus, &fr) &&
+                (pt.x < fr.left - 4 || pt.x > fr.right + 4 ||
+                 pt.y < fr.top - 4 || pt.y > fr.bottom + 4)) {
+                LogChFail(L"guiinfo", L"caret outside focused control (Qt whole-window caret)", 0);
+                return 0;
+            }
+            /* ★ 整窗假光标（Qt6：rcCaret = 主窗口矩形，qBittorrent 实测 2073×1291
+               与 winRect 完全一致，且 hwndFocus 也常是主窗口——包含性校验拿主窗
+               比主窗必然放行）。光标是插入点，大小不可能接近整个窗口：
+               宽高都 ≥ 焦点窗口尺寸-8px 即判假。 */
+            if (gi.hwndFocus && GetWindowRect(gi.hwndFocus, &fr) &&
+                w >= (fr.right - fr.left) - 8 && h >= (fr.bottom - fr.top) - 8) {
+                LogChFail(L"guiinfo", L"caret size equals focused window (Qt whole-window caret)", 0);
+                return 0;
+            }
+            /* ★ 退化光标（Qt 系：rcCaret 只有 2×2，KeePassXC 实测 h=2）：高度不可信，
+               照常落点会把提示钉在文本行顶（偏上一整行）。先问系统光标窗口自己
+               （GetWindowRect，直接就是屏幕物理像素，绕开上面的 DPI 换算）；
+               它也退化（程序自绘光标时）就放弃本轮 —— 宁可不显示，不钉错地方。 */
+            if (h < 8) {
+                /* 高度修复：GetWindowRect(hwndCaret) 是**所属窗口**的矩形而非
+                   光标尺寸（系统光标不是独立窗口）—— 上一版在这里把整个窗口
+                   当光标，提示直接飞到窗口左下角（qBittorrent/Qt6 测试台实测）。
+                   行高估算 = min(UIA 焦点元素高度, DPI 缩放默认行高)：
+                     · 单行输入框：元素高度 ≈ 行高，精确；
+                     · 多行编辑器：元素高度是整框（几百 px），截到默认行高
+                       （20px@96dpi，按显示器 DPI 缩放）——即固定补偿。
+                   两者都拿不到就老实不显示。 */
+                int eh = 0;
+                if (g_uia) {
+                    IUIAutomationElement* fe3 = NULL;
+                    RECT ue;
+                    if (SUCCEEDED(g_uia->GetFocusedElement(&fe3)) && fe3) {
+                        if (SUCCEEDED(fe3->get_CurrentBoundingRectangle(&ue)))
+                            eh = ue.bottom - ue.top;
+                        fe3->Release();
+                    }
+                }
+                int defh = MulDiv(20, (int)MonitorDpi(gi.hwndCaret), 96);
+                if (eh < 8 || eh > defh) eh = defh;
+                out->x = pt.x; out->y = pt.y;    /* pt = 光标顶（屏幕物理像素） */
+                out->h = eh; out->w = w;
+                return 1;
+            }
             out->x = pt.x; out->y = pt.y; out->h = h; out->w = w;
             return 1;
         }
@@ -319,6 +390,25 @@ static int ViaMsaa(CaretPos* out) {
                        且 QQ 的焦点元素没有 TextPattern，UIA 闸门拦不到它，
                        不在这里拒掉，圆点就钉在没有输入框的位置。 */
         LogChFail(L"msaa", L"accLocation returned zero-width caret", 0);
+        return 0;
+    }
+    /* ★ 合理性：光标必须落在焦点控件窗口内。Qt6（qBittorrent 实测）打字时
+       OBJID_CARET 报**固定不变的残留假位置**（(854,969,1×32)，远在搜索框
+       (810,115)-(1010,135) 之外，且完全不随输入变化）——guiinfo 的整窗假光标
+       修掉后它就露出来了。与 guiinfo 的包含性校验同款。 */
+    RECT fr;
+    if (GetWindowRect(hwnd, &fr) &&
+        (x < fr.left - 4 || x > fr.right + 4 ||
+         y < fr.top - 4 || y > fr.bottom + 4)) {
+        LogChFail(L"msaa", L"caret outside focused control (stale data)", 0);
+        return 0;
+    }
+    /* ★ UIA 焦点元素包含性：真光标必在 UIA 焦点元素矩形内。Qt6（qBittorrent）
+       的 OBJID_CARET 会报**固定不变的残留假位置**（(854,969,1×32)），它落在
+       主窗口内，而 hwndFocus 也常是主窗口 → 焦点控件包含性拦不住，用 UIA
+       焦点元素矩形再拦一道。 */
+    if (PtOutsideUiaFocus(x, y)) {
+        LogChFail(L"msaa", L"caret outside UIA focused element", 0);
         return 0;
     }
     out->x = (int)x; out->y = (int)y; out->w = (int)w; out->h = (int)h;   /* ★ w 之前漏赋值，日志里 msaa 的 w 恒 0 */
@@ -601,8 +691,15 @@ static int ViaIme(CaretPos* out) {
                     pt.x = org.x + MulDiv(pt.x - org.x, (int)dpiM, (int)dpiW);
                     pt.y = org.y + MulDiv(pt.y - org.y, (int)dpiM, (int)dpiW);
                 }
-                out->x = pt.x; out->y = pt.y; out->h = 20;
-                ok = 1;
+                /* ★ UIA 焦点元素包含性：应用不处理 IME 定位时（Qt6/TSF 系），
+                   组合窗给的是系统默认位置 = 窗口客户区左下角，不是真实光标
+                   （qBittorrent / Qt6 测试台实测）。出 UIA 焦点元素即弃。 */
+                if (PtOutsideUiaFocus(pt.x, pt.y)) {
+                    LogChFail(L"ime", L"composition point outside UIA focused element (default corner)", 0);
+                } else {
+                    out->x = pt.x; out->y = pt.y; out->h = 20;
+                    ok = 1;
+                }
             }
         }
     }
