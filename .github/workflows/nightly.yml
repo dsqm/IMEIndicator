@@ -53,15 +53,14 @@ jobs:
             created=$(gh release view nightly -R "$repo" --json createdAt --jq .createdAt)
           fi
 
-          # ---- 生成提交列表 ----
+          # ---- 生成提交列表（最多 5 条，SHA 链接到 commit 页）----
           if [ -n "$stable_tag" ] && git rev-parse -q --verify "refs/tags/$stable_tag" >/dev/null; then
-            log=$(git log --oneline "$stable_tag"..HEAD | head -30)
-            range="自上次正式版 $stable_tag 以来的提交："
+            log=$(git log --oneline -5 "$stable_tag..HEAD")
+            range="自 $stable_tag 以来的提交（[查看全部](https://github.com/$repo/compare/$stable_tag...nightly)）："
           else
-            log=$(git log --oneline -30)
+            log=$(git log --oneline -5)
             range="最近的提交："
           fi
-          [ -z "$log" ] && log="（无新提交，与 $stable_tag 内容相同）"
 
           # ---- 说明内容 ----
           {
@@ -70,9 +69,14 @@ jobs:
             echo "commit: $sha"
             echo ""
             echo "$range"
-            echo '```'
-            echo "$log"
-            echo '```'
+            if [ -z "$log" ]; then
+              echo "（无新提交，与 $stable_tag 内容相同）"
+            else
+              echo "$log" | while read -r line; do
+                s=${line%% *}; m=${line#* }
+                echo "- [\`$s\`](https://github.com/$repo/commit/$s) $m"
+              done
+            fi
           } > notes.md
 
           # ---- 正式版更新过 → 删掉重建，保持每夜版在最上面 ----
@@ -89,7 +93,7 @@ jobs:
             gh release create nightly "bin/IMEIndicator.exe" -R "$repo" \
               --target "$GITHUB_SHA" \
               --prerelease \
-              --title "IMEIndicator 每夜版 $today" \
+              --title "Nightly Build" \
               --notes-file notes.md
             exit 0
           fi
@@ -103,7 +107,9 @@ jobs:
           fi
 
           # ---- 有新提交 → 就地更新 ----
+          # tag 还停在旧提交，先移到 HEAD，Release 的源码快照和对比链接才正确
+          git push -f origin "$GITHUB_SHA:refs/tags/nightly"
           gh release upload nightly "bin/IMEIndicator.exe" -R "$repo" --clobber
           gh release edit nightly -R "$repo" \
-            --title "IMEIndicator 每夜版 $today" \
+            --title "Nightly Build" \
             --notes-file notes.md
