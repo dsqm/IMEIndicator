@@ -1,0 +1,109 @@
+name: nightly
+
+# 每夜版（预发布）：固定 tag `nightly`，永远只有一个。
+#   - 每天北京时间 0 点（UTC 16:00）检查一次。
+#   - HEAD 的 commit SHA 和上次构建相同（期间没推送）→ 跳过。
+#   - 有新提交 → 就地更新：覆盖 exe、重写说明，不删不建。
+#   - 若最新正式版比 nightly Release 晚发布（期间发了正式版）
+#     → 删掉重建，让每夜版重新排到 Release 列表最上面。
+on:
+  schedule:
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  nightly:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 完整历史 + tag，用于生成「自上次正式版以来的提交」列表
+
+      # exe 内嵌版本号取系统本地时间（build.bat 用 Get-Date），
+      # 先把时区设为中国标准时间，和说明里的构建日期保持一致。
+      - name: Set timezone to China Standard Time
+        shell: powershell
+        run: Set-TimeZone -Id "China Standard Time"
+
+      - name: Build
+        shell: cmd
+        run: call build.bat
+
+      - name: Update nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          repo="$GITHUB_REPOSITORY"
+          sha="${GITHUB_SHA:0:8}"
+          today=$(TZ=Asia/Shanghai date +%Y.%m.%d)
+
+          # ---- 收集信息（releases/latest 不含预发布，返回的就是最新正式版）----
+          stable=$(gh api "repos/$repo/releases/latest" 2>/dev/null || true)
+          stable_tag=$(echo "$stable" | jq -r '.tag_name // empty')
+          stable_pub=$(echo "$stable" | jq -r '.published_at // empty')
+
+          have=0
+          created=""
+          if gh release view nightly -R "$repo" >/dev/null 2>&1; then
+            have=1
+            created=$(gh release view nightly -R "$repo" --json createdAt --jq .createdAt)
+          fi
+
+          # ---- 生成提交列表 ----
+          if [ -n "$stable_tag" ] && git rev-parse -q --verify "refs/tags/$stable_tag" >/dev/null; then
+            log=$(git log --oneline "$stable_tag"..HEAD | head -30)
+            range="自上次正式版 $stable_tag 以来的提交："
+          else
+            log=$(git log --oneline -30)
+            range="最近的提交："
+          fi
+          [ -z "$log" ] && log="（无新提交，与 $stable_tag 内容相同）"
+
+          # ---- 说明内容 ----
+          {
+            echo "每夜版（预发布）：构建于 $today"
+            echo ""
+            echo "commit: $sha"
+            echo ""
+            echo "$range"
+            echo '```'
+            echo "$log"
+            echo '```'
+          } > notes.md
+
+          # ---- 正式版更新过 → 删掉重建，保持每夜版在最上面 ----
+          if [ "$have" = 1 ] && [ -n "$stable_pub" ]; then
+            if [ "$(date -d "$stable_pub" +%s)" -ge "$(date -d "$created" +%s)" ]; then
+              echo "stable released after nightly -> recreate"
+              gh release delete nightly -R "$repo" --yes --cleanup-tag
+              have=0
+            fi
+          fi
+
+          # ---- 不存在 → 新建 ----
+          if [ "$have" = 0 ]; then
+            gh release create nightly "bin/IMEIndicator.exe" -R "$repo" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --title "IMEIndicator 每夜版 $today" \
+              --notes-file notes.md
+            exit 0
+          fi
+
+          # ---- 没推送 → 跳过（比对说明里记录的 SHA）----
+          body=$(gh release view nightly -R "$repo" --json body --jq .body)
+          recorded=$(echo "$body" | sed -n 's/^commit: //p')
+          if [ "$recorded" = "$sha" ]; then
+            echo "no new commits since last nightly -> skip"
+            exit 0
+          fi
+
+          # ---- 有新提交 → 就地更新 ----
+          gh release upload nightly "bin/IMEIndicator.exe" -R "$repo" --clobber
+          gh release edit nightly -R "$repo" \
+            --title "IMEIndicator 每夜版 $today" \
+            --notes-file notes.md
