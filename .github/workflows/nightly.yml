@@ -18,7 +18,7 @@ jobs:
   nightly:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0   # 完整历史 + tag，用于生成「自上次正式版以来的提交」列表
 
