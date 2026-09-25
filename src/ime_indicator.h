@@ -75,7 +75,7 @@ typedef struct {
 /* ---- config.c ---- */
 void   CfgLoad(ImeCfg* c);      /* 读 IMEIndicator.ini（缺则写模板） */
 void   CfgPath(WCHAR* out, size_t cap); /* 配置文件完整路径（托盘「打开配置」用） */
-int    CfgBlockedForeground(void); /* 前台程序进程名是否命中 [Ignore] */
+int    CfgBlockedForeground(void); /* 前台命中 [Ignore]，或进程名读不到（受保护进程） */
 
 /* ---- debug.c ---- */
 extern volatile LONG g_logging; /* 托盘「记录日志」开关（1=写 log） */

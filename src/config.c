@@ -8,7 +8,8 @@
    [General]   键值项（Key = Value）
    [Colors]    三/四状态颜色（#RRGGBB 或 #RRGGBBAA）+ 全局透明度
    [Overlay]   圆点尺寸与光标偏移、检测间隔
-   [Ignore]    程序黑名单：前台是这些进程时跳过中英状态检测（规避游戏卡顿）
+   [Ignore]    程序黑名单：前台是这些进程时彻底隐身（不检测、不查询、
+               不显示圆点）；进程名读不到的受保护程序同样隐身
    文件不存在时写一份带注释的模板。颜色值只认前导 #RRGGBB 解析，
    解析失败回退默认。 */
 
@@ -17,6 +18,9 @@
 
 static WCHAR g_ignore[CFG_MAX_ENTRIES][CFG_NAME_MAX];
 static int   g_ignoreCount = 0;
+static HWND  g_bpHwnd      = NULL;  /* 黑名单判定缓存键：焦点窗口 + PID */
+static DWORD g_bpPid       = 0;
+static int   g_bpBlocked   = 0;
 
 /* ---------- 小工具 ---------- */
 
@@ -400,6 +404,7 @@ void CfgLoad(ImeCfg* c) {
             ";\n"
             "[Ignore]\n"
             "; 前台程序命中名单时**彻底隐身**：不做状态检测、不做光标查询、不显示圆点。\n"
+            "; 进程名读不到的受保护程序（内核反作弊游戏等）同样隐身，无需写进名单。\n"
             "; 每行一个进程名：完全匹配、大小写不敏感、.exe 后缀可写可不写。\n"
             "; 例：\n"
             "; somegame.exe\n";
@@ -530,18 +535,33 @@ static int GetFocusProcessName(HWND focus, WCHAR* out, size_t cap) {
     return out[0]!=0;
 }
 
-/* 前台（焦点）程序是否命中 [Ignore] 黑名单 */
-int CfgBlockedForeground(void) {
+/* 进程名（全路径）是否命中 [Ignore] 黑名单 */
+static int NameInIgnore(const WCHAR* full) {
     if (g_ignoreCount==0) return 0;
-    extern HWND ImeFocusedWindow(void);
-    HWND w=ImeFocusedWindow();
-    if (!w) return 0;
-    WCHAR name[MAX_PATH];
-    if (!GetFocusProcessName(w,name,MAX_PATH)) return 0;
     WCHAR n[CFG_NAME_MAX];
-    _snwprintf_s(n,CFG_NAME_MAX,_TRUNCATE,L"%s",name);
+    _snwprintf_s(n,CFG_NAME_MAX,_TRUNCATE,L"%s",full);
     StripExeW(n);
     for (int i=0;i<g_ignoreCount;i++)
         if (_wcsicmp(n,g_ignore[i])==0) return 1;
     return 0;
+}
+
+/* 前台（焦点）程序是否应隐身：命中 [Ignore] 黑名单，或进程名取不到
+   （受保护进程：内核反作弊游戏、PPL 系统进程等，OpenProcess 被拒）。
+   取不到名宁可隐身也不去碰它 —— IME 检测要跨进程发消息，正是黑名单
+   要规避的卡顿源。按（焦点窗口， PID）缓存判定结果，窗口或进程换了
+   才重新 OpenProcess，同一窗口内连续的检测 tick 全部走缓存。 */
+int CfgBlockedForeground(void) {
+    extern HWND ImeFocusedWindow(void);
+    HWND w=ImeFocusedWindow();
+    if (!w) return 0;
+    DWORD pid=0; GetWindowThreadProcessId(w,&pid);
+    if (!pid) return 0;
+    if (w!=g_bpHwnd || pid!=g_bpPid) {
+        WCHAR name[MAX_PATH];
+        g_bpBlocked = GetFocusProcessName(w,name,MAX_PATH)
+                      ? NameInIgnore(name) : 1;
+        g_bpHwnd=w; g_bpPid=pid;
+    }
+    return g_bpBlocked;
 }

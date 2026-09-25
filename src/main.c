@@ -355,16 +355,16 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             DbgLog(L"== logging on  screenDPI=%d fg:%s (process DPI-aware per-monitor)", dpi, lastFg);
         }
 
-        /* [Ignore] 命中：跳过中英状态检测（中文组合查询会跨进程发消息，可能
-           卡顿）。光标追踪照常，圆点保持上一次颜色。 */
+        /* [Ignore] 黑名单边沿：进/出各记一条日志；命中时的行为见下一块注释。 */
         int blocked = CfgBlockedForeground();
         if (blocked != wasBlocked) {
             wasBlocked = blocked;
             if (g_logging) DbgLog(L"%s", blocked ? L"IGNORE: skip-detect" : L"IGNORE: resume-detect");
         }
 
-        /* [Ignore] 命中 = **彻底隐身**：不去碰前台程序（跨进程查询是卡顿与干扰的根），
-           圆点也不显示。离开黑名单时清掉旧坐标，让它第一帧算一次"光标变化"重新亮。 */
+        /* [Ignore] 命中 / 进程名读不到（受保护进程）= **彻底隐身**：不去碰
+           前台程序（跨进程查询是卡顿与干扰的根），圆点也不显示。离开时清掉
+           旧坐标，让它第一帧算一次"光标变化"重新亮。 */
         if (blocked) {
             if (shown) { OverlaySetVisible(0); shown = 0; }
             haveLastCp = 0;
