@@ -39,7 +39,9 @@ jobs:
         run: |
           repo="$GITHUB_REPOSITORY"
           sha="${GITHUB_SHA:0:8}"
-          today=$(TZ=Asia/Shanghai date +%Y.%m.%d)
+          # 北京时间 = UTC+8。TZ=Asia/Shanghai 在 runner 的 Git Bash 里
+          # 会静默失效（缺 zoneinfo），改用 UTC 加 8 小时换算。
+          today=$(date -u -d "+8 hours" +%Y.%m.%d)
 
           # ---- 收集信息（releases/latest 不含预发布，返回的就是最新正式版）----
           stable=$(gh api "repos/$repo/releases/latest" 2>/dev/null || true)
