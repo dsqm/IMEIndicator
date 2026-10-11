@@ -34,8 +34,10 @@ jobs:
           if [ "$quiet" -lt 15 ]; then
             echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          pub=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
-                --jq '.published_at' 2>/dev/null || true)
+          # 还没有正式 Release 时 releases/latest 返回 404（响应体是错误 JSON），
+          # 不能直接把它当时间戳；交给 jq 取字段，取不到就按「没发布过」处理。
+          resp=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" 2>/dev/null || true)
+          pub=$(echo "$resp" | jq -r '.published_at // empty' 2>/dev/null || true)
           if [ -n "$pub" ]; then
             pcts=$(date -d "$pub" +%s)
             if [ "$pcts" -ge "$last" ]; then
