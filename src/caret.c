@@ -240,6 +240,86 @@ UINT MonitorDpi(HWND hwnd) {
    全部实测注释与三条通道的实现，这里只按顺序调用（见下方 TRY_CHANNEL）。 */
 
 
+/* 焦点控件是否为 Flutter Windows 引擎的视图子窗口。
+   引擎（shell/platform/windows/text_input_manager.cc）在文本客户端激活时
+   CreateCaret(view, 1×1)，之后每次框架上报 composing rect 都 SetCaretPos。
+   但引擎只处理 TextInput.setMarkedTextRect、丢弃 setCaretRect，而框架
+   （editable_text.dart 的 _updateComposingRectIfNeeded）在没有组合串时
+   回退上报 offset 0 的字符框 —— 所以这个 1×1 光标：
+     · 非组合期 = 被聚焦编辑框的**文本起点**（空框时恰好就是真光标）；
+     · 组合期 = 组合串起点（搜狗非内联组合时框架组合段恒空，仍在起点）；
+     · 每帧刷新、随焦点框移动 —— 不是陈旧残留，是 Flutter 唯一对外
+       暴露的光标信号（UIA 无 TextPattern，MSAA 照抄同一个光标）。
+   实测（caretprobe，Flutter 3.47）：点击/打字/拼音组合期间它纹丝不动地
+   停在文本起点，位置随焦点框切换而变。 */
+static int FocusIsFlutterView(HWND hwndFocus) {
+    WCHAR cls[16];
+    return hwndFocus && GetClassNameW(hwndFocus, cls, 16) &&
+           lstrcmpW(cls, L"FLUTTERVIEW") == 0;
+}
+
+/* ---------- Flutter 锚点缓存（CARET_FLUTTER 通道） ----------
+   引擎在 WM_IME_SETCONTEXT（窗口带 IME 焦点）时 CreateCaret，在组合结束
+   （WM_IME_ENDCOMPOSITION → DestroyImeWindow）时 DestroyCaret —— 实测
+   （caretwatch，Flutter 3.47 + 搜狗）：**第一次拼音上屏后 caret 就没了**，
+   且同一次焦点会话内不再重建：搜狗等非内联 IME 不给应用发
+   WM_IME_STARTCOMPOSITION，只有窗口重新聚焦（SETCONTEXT）才会重建。
+   期间 guiinfo/msaa 全 miss，连搜狗自己的组合窗都只能画在旧锚点上。
+   所以 caret 活着时把锚点缓存住（guiinfo 的 Flutter 分支调
+   FlutterAnchorSave）；caret 死后继续用缓存锚点 —— 这已是全部可得信号。
+   采信前做**包含性校验**：锚点必须落在当前 UIA 焦点元素矩形内（±4px，
+   同 PtOutsideUiaFocus）—— 换了输入框/移动了窗口都会出框，出框即弃，
+   宁可不显示也不钉错地方。重新聚焦后 caret 重建，guiinfo 恢复命中，
+   缓存随之刷新。（不用 RuntimeId 认字段：Flutter provider 的
+   GetFocusedElement 有时直接给窗口元素、GetRuntimeId 不可靠，实测。） */
+static int g_flAnchorValid = 0;
+static CaretPos g_flAnchor;
+
+static void FlutterAnchorSave(const CaretPos* cp) {
+    g_flAnchor = *cp;
+    g_flAnchorValid = 1;
+}
+
+/* 方法5：Flutter 锚点缓存（guiinfo 在 caret 死亡后的 Flutter 专用兜底） */
+static int ViaFlutterAnchor(CaretPos* out) {
+    if (!g_flAnchorValid) return 0;
+    HWND fw = ImeFocusedWindow();
+    if (!fw) return 0;
+    WCHAR cls[16];
+    if (!GetClassNameW(fw, cls, 16) || lstrcmpW(cls, L"FLUTTERVIEW") != 0) {
+        g_flAnchorValid = 0;      /* 焦点已离开 Flutter：缓存作废 */
+        return 0;
+    }
+    if (g_uia) {
+        IUIAutomationElement* fe = NULL;
+        if (SUCCEEDED(g_uia->GetFocusedElement(&fe)) && fe) {
+            RECT ue;
+            int outside = 0;
+            if (SUCCEEDED(fe->get_CurrentBoundingRectangle(&ue)) &&
+                (ue.right > ue.left || ue.bottom > ue.top) &&
+                (g_flAnchor.x < ue.left - 4 || g_flAnchor.x > ue.right + 4 ||
+                 g_flAnchor.y < ue.top - 4 || g_flAnchor.y > ue.bottom + 4))
+                outside = 1;
+            fe->Release();
+            if (outside) {
+                g_flAnchorValid = 0;
+                LogChFail(L"flutter_anchor", L"anchor outside focused field (stale)", 0);
+                return 0;
+            }
+        }
+        /* 焦点元素/矩形取不到（provider 暂时不可用）：沿用缓存 */
+    }
+    *out = g_flAnchor;
+    out->depth = -1;
+    return 1;
+}
+
+/* 焦点是否在 Flutter 视图上。main.c 用：caret 死亡后 Flutter 再没有
+   "光标移动"这种临时显示的自然由头，组合窗收起（上屏/取消）时补一次。 */
+int CaretFocusIsFlutterView(void) {
+    return FocusIsFlutterView(ImeFocusedWindow());
+}
+
 /* 方法1：前台线程的 caret 矩形（GetGUIThreadInfo 可跨进程读） */
 static int ViaGuiInfo(CaretPos* out) {
     HWND fg = GetForegroundWindow();
@@ -297,6 +377,18 @@ static int ViaGuiInfo(CaretPos* out) {
                （GetWindowRect，直接就是屏幕物理像素，绕开上面的 DPI 换算）；
                它也退化（程序自绘光标时）就放弃本轮 —— 宁可不显示，不钉错地方。 */
             if (h < 8) {
+                /* ★ Flutter（FLUTTERVIEW）：上面的 1×1 就是引擎每帧维护的
+                   "文本起点锚点"（见 FocusIsFlutterView 注释），照常采信。
+                   引擎 SetCaretPos(left, bottom) —— y 已经是文本底部，再套
+                   行高估算只会把点推到基线以下，h 取 1 让圆点贴文本底。 */
+                if (FocusIsFlutterView(gi.hwndFocus)) {
+                    out->x = pt.x; out->y = pt.y;
+                    out->h = 1; out->w = w > 0 ? w : 1;
+                    /* caret 活着就刷新锚点缓存 —— 首次拼音上屏后引擎会把它
+                       销毁（见 ViaFlutterAnchor 注释），之后只能靠缓存。 */
+                    FlutterAnchorSave(out);
+                    return 1;
+                }
                 /* 高度修复：GetWindowRect(hwndCaret) 是**所属窗口**的矩形而非
                    光标尺寸（系统光标不是独立窗口）—— 上一版在这里把整个窗口
                    当光标，提示直接飞到窗口左下角（qBittorrent/Qt6 测试台实测）。
@@ -735,6 +827,7 @@ static const WCHAR* CaretSrcName(CaretSource s) {
     case CARET_WPS:       return L"wps";
     case CARET_WPP:       return L"wpp";
     case CARET_ET:        return L"et";
+    case CARET_FLUTTER:   return L"flutter";
     default:              return L"none";
     }
 }
@@ -801,6 +894,8 @@ static int CaretProbeOnce(CaretPos* out) {
     TRY_CHANNEL(ViaMsaa, CARET_MSAA, L"msaa: no caret object");
     TRY_CHANNEL(ViaUiaSelection, CARET_UIA_SEL, L"uia_sel: no caret rect");
     TRY_CHANNEL(ViaIme, CARET_IME, L"ime: no composition window");
+    /* Flutter 锚点缓存放最后：只在 caret 被引擎销毁（前面通道全 miss）时兜底 */
+    TRY_CHANNEL(ViaFlutterAnchor, CARET_FLUTTER, L"flutter: no cached anchor");
 done:
     if (out->source != CARET_NONE) { out->found = 1; return 1; }
     out->x = out->y = out->h = 0;

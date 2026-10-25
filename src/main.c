@@ -262,6 +262,7 @@ static const WCHAR* SrcName(CaretSource s) {
     case CARET_WPS:       return L"wps";
     case CARET_WPP:       return L"wpp";
     case CARET_ET:        return L"et";
+    case CARET_FLUTTER:   return L"flutter";
     default:              return L"none";
     }
 }
@@ -275,8 +276,7 @@ static const WCHAR* StateName(ImeState s) {
     case IMEST_EN:     return L"EN";
     default:           return L"?";
     }
-}
-/* 各状态对应的圆点颜色；IME_COLOR_NONE = 该状态不显示圆点 */
+}/* 各状态对应的圆点颜色；IME_COLOR_NONE = 该状态不显示圆点 */
 static DWORD StateColor(ImeState s) {
     switch (s) {
     case IMEST_CAPS:   return g_cfg.capsrgb;
@@ -466,7 +466,14 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             occluded = (f && ImeFloatOccluding(f, nearDot));
             if (occluded) want = 0;
         }
-        if (!occluded && wasOccl) occlEndAt = now;   /* 遮挡结束：上屏或取消 */
+        if (!occluded && wasOccl) {
+            occlEndAt = now;   /* 遮挡结束：上屏或取消 */
+            /* Flutter：caret 在首次上屏后被引擎销毁且不再重建（见 caret.c
+               ViaFlutterAnchor 注释），之后不再有"光标移动"当临时显示的
+               自然由头 —— 组合窗收起本身就是一次该亮的由头，与普通程序里
+               上屏 caret 前跳触发重闪对齐。 */
+            if (CaretFocusIsFlutterView()) ahAt = now;
+        }
         wasOccl = occluded;
 
         /* 光标追踪：找到就跟随，找不到就隐藏。

@@ -120,7 +120,8 @@ typedef enum {
     CARET_IME,       /* IME 组合窗口 */
     CARET_WPS,       /* WPS 文字：Word 对象模型 GetPoint（见 wps.c） */
     CARET_WPP,       /* WPS 演示：PowerPoint 对象模型 Bound* + 点→像素（见 wps.c） */
-    CARET_ET         /* WPS 表格：Excel 对象模型 ActiveCell + 点→像素（见 wps.c） */
+    CARET_ET,        /* WPS 表格：Excel 对象模型 ActiveCell + 点→像素（见 wps.c） */
+    CARET_FLUTTER    /* Flutter：引擎锚点缓存（caret 被引擎销毁后的兜底，见 caret.c） */
 } CaretSource;
 typedef struct { int x, y, h, w; int found; int depth; CaretSource source; } CaretPos;
 /* w 与 depth 只是**诊断信息**（w=矩形宽、depth=文本模式在焦点链上的层数，-1=该通道
@@ -147,6 +148,7 @@ void   CaretWorkerStop(void);             /* 通知线程退出并回收（最�
    返回 1 时 out 里是屏幕物理像素坐标。 */
 int    CaretGetPosEx(CaretPos* out, int* timeoutOut);
 int    CaretIsForegroundFullscreen(void); /* 前景窗口是否全屏（日志诊断用） */
+int    CaretFocusIsFlutterView(void);  /* 焦点控件是否为 Flutter 视图（main.c 组合收起时补"亮一下"用） */
 
 /* ---- overlay.c ---- */
 void   OverlayInit(ImeCfg* c);      /* 创建透明悬浮窗（需在含消息循环的线程）*/
