@@ -33,6 +33,10 @@ https://docs.qq.com/aio/DRWtMY3FQS0ZHRGRG
 
 同一时刻只允许一个实例，重复启动会直接退出。
 
+## 已知问题
+微信输入框无文字时不显示提示。  
+会造成部分游戏卡顿。可尝试将游戏进程添加至黑名单  
+
 ## 配置
 
 首次运行会在 exe 同目录生成带注释的 `IMEIndicator.ini`（UTF-8）
