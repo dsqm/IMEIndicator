@@ -1,11 +1,13 @@
 name: auto-release
 
-# 15 天没有推送就自动发布 Release：
+# 15 天没有推送就自动发布正式版：
 #   - 触发条件：距最后一次推送 >= 15 天，且最后一次推送之后还没有发布过
-#     （对比最近一次 Release 的 published_at 与最后一次提交时间，避免同一
-#     静默期内重复发版）。
-#   - 版本号 = 发布日期（tag = vYYYY.MM.DD），exe 里的版本号也是构建当天
-#     日期（build.bat 生成），两者天然一致。
+#     （对比最近一次正式版 Release 的 published_at 与最后一次提交时间，避免同一
+#     静默期内重复发版）；当天 tag 已存在也跳过，不做无谓构建。
+#   - 版本号 = 构建当天的北京时间（tag = vYYYY.MM.DD）。exe 内嵌版本号由
+#     build.bat 按系统本地时间生成，构建前统一切到中国标准时间，两者一致。
+#   - 说明沿用每夜版格式：版本与构建日期、commit、自上一正式版以来的提交
+#     列表（最多 5 条带 commit 链接 + 全量对比入口）。
 #   - 每天 UTC 03:00 检查一次；workflow_dispatch 供手动触发测试。
 on:
   schedule:
@@ -20,6 +22,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # 完整历史 + tag，用于生成「自上次正式版以来的提交」列表
 
       - name: Check 15-day quiet period
         id: decide
@@ -45,7 +49,25 @@ jobs:
               echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
           fi
+          # 北京时间 = UTC+8。TZ=Asia/Shanghai 在 runner 的 Git Bash 里
+          # 会静默失效（缺 zoneinfo），改用 UTC 加 8 小时换算。
+          ver=$(date -u -d "+8 hours" +%Y.%m.%d)
+          tag="v$ver"
+          # 查远端 tag 而不是 Release：tag 还在但 Release 被删时也别重复构建。
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "tag $tag already exists -> skip"
+            echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           echo "go=true" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # exe 内嵌版本号取系统本地时间（build.bat 用 Get-Date），
+      # 先把时区设为中国标准时间，和说明里的构建日期、tag 保持一致。
+      - name: Set timezone to China Standard Time
+        if: steps.decide.outputs.go == 'true'
+        shell: powershell
+        run: Set-TimeZone -Id "China Standard Time"
 
       - name: Build
         if: steps.decide.outputs.go == 'true'
@@ -56,14 +78,51 @@ jobs:
         if: steps.decide.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.decide.outputs.ver }}
+          TAG: ${{ steps.decide.outputs.tag }}
         shell: bash
         run: |
-          ver=$(date +%Y.%m.%d)
-          tag="v$ver"
-          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "tag $tag already exists, skip"; exit 0
+          repo="$GITHUB_REPOSITORY"
+          ver="$VER"
+          tag="$TAG"
+          sha="${GITHUB_SHA:0:8}"
+
+          # ---- 上一正式版（releases/latest 不含预发布）----
+          stable=$(gh api "repos/$repo/releases/latest" 2>/dev/null || true)
+          stable_tag=$(echo "$stable" | jq -r '.tag_name // empty')
+
+          # ---- 生成提交列表（最多 5 条，SHA 链接到 commit 页）----
+          if [ -n "$stable_tag" ] && git rev-parse -q --verify "refs/tags/$stable_tag" >/dev/null; then
+            log=$(git log --oneline -5 "$stable_tag..HEAD")
+            range="自 $stable_tag 以来的提交（[查看全部](https://github.com/$repo/compare/$stable_tag...$tag)）："
+          else
+            log=$(git log --oneline -5)
+            range="最近的提交（[查看全部](https://github.com/$repo/commits/$tag)）："
           fi
+
+          # ---- 说明内容 ----
+          {
+            echo "正式版（自动发布）：版本 v$ver，构建于 $ver"
+            echo ""
+            echo "commit: $sha"
+            echo ""
+            echo "$range"
+            if [ -z "$log" ]; then
+              if [ -n "$stable_tag" ]; then
+                echo "（无新提交，与 $stable_tag 内容相同）"
+              else
+                echo "（无提交记录）"
+              fi
+            else
+              echo "$log" | while read -r line; do
+                s=${line%% *}; m=${line#* }
+                echo "- [\`$s\`](https://github.com/$repo/commit/$s) $m"
+              done
+            fi
+          } > notes.md
+
           gh release create "$tag" "bin/IMEIndicator.exe" \
-            -R "$GITHUB_REPOSITORY" \
+            -R "$repo" \
+            --target "$GITHUB_SHA" \
             --title "IMEIndicator v$ver" \
-            --notes "自动发布：距上次推送已超过 15 天。版本号 = 发布日期 $ver"
+            --notes-file notes.md
