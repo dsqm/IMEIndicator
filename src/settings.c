@@ -1323,28 +1323,31 @@ static void FillIgnorePanel(void) {
 /* 预览的状态切换：11 个状态都能看，不然预览永远只有当前页第一个状态。
    下拉沿用自绘的 SEL_CLASS，挂在预览条自己身上 —— 几何跟着预览走，缩放时
    不用主窗口再摆一次。 */
-static ImeState PreviewStateAt(int idx) {
+static void InvalidatePreview(void);
+static int PreviewStates(ImeState* out, int cap) {
     int n = 0;
     for (int p = 0; p < 5; p++) {
         for (int k = 0; k < 3; k++) {
             ImeState s = kPages[p].states[k];
             if ((int)s < 0) continue;
-            if (n++ == idx) return s;
+            if (n >= cap) return n;
+            out[n++] = s;
         }
     }
-    return IMEST_US;
+    return n;
+}
+
+static ImeState PreviewStateAt(int idx) {
+    ImeState list[IMEST_COUNT];
+    int n = PreviewStates(list, IMEST_COUNT);
+    return (idx >= 0 && idx < n) ? list[idx] : IMEST_US;
 }
 
 static int PreviewIndexOf(ImeState s) {
-    int n = 0;
-    for (int p = 0; p < 5; p++) {
-        for (int k = 0; k < 3; k++) {
-            ImeState t = kPages[p].states[k];
-            if ((int)t < 0) continue;
-            if (t == s) return n;
-            n++;
-        }
-    }
+    ImeState list[IMEST_COUNT];
+    int n = PreviewStates(list, IMEST_COUNT);
+    for (int i = 0; i < n; i++)
+        if (list[i] == s) return i;
     return -1;
 }
 
@@ -1367,6 +1370,23 @@ static void SyncPreviewSwitch(void) {
     if (!g_swState) return;
     int idx = PreviewIndexOf((ImeState)g_selState);
     if (idx >= 0) SendMessageW(g_swState, CB_SETCURSEL, (WPARAM)idx, 0);
+}
+
+/* 滚轮翻状态：-1 上一个，+1 下一个。到头就停住，不绕回 —— 不然一直滚
+   下去会不知道自己在列表的哪个位置。 */
+static void StepPreviewState(int dir) {
+    ImeState list[IMEST_COUNT];
+    int n = PreviewStates(list, IMEST_COUNT);
+    if (n <= 0) return;
+    int idx = PreviewIndexOf((ImeState)g_selState);
+    if (idx < 0) idx = 0;
+    int next = idx + dir;
+    if (next < 0) next = 0;
+    if (next >= n) next = n - 1;
+    if (next == idx) return;
+    g_selState = (int)list[next];
+    SyncPreviewSwitch();
+    InvalidatePreview();
 }
 
 static void BuildPreviewSwitch(HWND parent) {
@@ -2206,6 +2226,23 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int t = HitTab(mx, my);
         if (t >= 0) SwitchPage(t);
         return 0;
+    }
+
+    case WM_MOUSEWHEEL: {
+        /* 光标停在预览状态下拉上时，滚轮直接翻状态 —— 不用点开列表就能
+           一路滚着比较各状态的样子。滚轮消息发给焦点窗口，所以按屏幕坐标
+           反查光标下面是谁。 */
+        POINT pt;
+        pt.x = (short)LOWORD(l);
+        pt.y = (short)HIWORD(l);
+        HWND under = WindowFromPoint(pt);
+        if (g_swState && under && (under == g_swState || IsChild(g_swState, under))) {
+            int delta = GET_WHEEL_DELTA_WPARAM(w);
+            if (delta > 0)      StepPreviewState(-1);
+            else if (delta < 0) StepPreviewState(1);
+            return 0;
+        }
+        break;                  /* 其它地方照常滚动 */
     }
 
     case WM_DRAWITEM: {
