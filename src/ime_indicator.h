@@ -110,6 +110,9 @@ void   CfgDefaults(ImeCfg* c);          /* 填出厂默认值 */
 /* 把状态 s 的样式解析成最终值（继承链 + defaults），结果写进 out。
    带环保护：inherit 指回自己/成环时按"不继承"处理。 */
 void   CfgStateStyle(const ImeCfg* c, ImeState s, StateStyle* out);
+/* 尺寸/偏移/透明度是否"跟中文输入法(cn_cn)"：自己没显式设过、也没有整块继承。
+   设置程序据此画每行的「自定义」勾选框；求值回落见 CfgStateStyle。 */
+int    CfgFieldFollowsCn(const ImeCfg* c, ImeState s, unsigned sfBit);
 const WCHAR* CfgStateName(ImeState s);  /* "cn_cn" 这类 JSON 键名 */
 int    CfgStateFromName(const WCHAR* name); /* 反查；认不出返回 -1 */
 const WCHAR* CfgShapeName(int shape);   /* "circle" / "triangle" / "none" / "image" */

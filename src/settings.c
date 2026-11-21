@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <wchar.h>
 #include <stdlib.h>
+#include <math.h>
 #include <commctrl.h>
 #include <commdlg.h>
 
@@ -48,6 +49,11 @@
 #define F_OFFY      7
 #define F_ALPHA     8
 #define F_TRANSIENT 9
+/* 尺寸/偏移/透明度的「自定义」勾选框字段（10..13）：不勾=跟随 cn_cn */
+#define F_CUSTOM_SIZE  10
+#define F_CUSTOM_OFFX  11
+#define F_CUSTOM_OFFY  12
+#define F_CUSTOM_ALPHA 13
 #define F_POLL      20
 #define F_TRACK     21
 #define F_STRATEGY  22
@@ -61,12 +67,26 @@
 static const int kStateFields[4]  = { F_SIZE, F_OFFX, F_OFFY, F_ALPHA };
 static const int kGlobalFields[4] = { F_POLL, F_TRACK, F_TIMEOUT, F_AUTOHIDE };
 
+/* 尺寸/偏移/透明度 四项对应的"显式设过"位；顺序与 Block 里的滑块一致 */
+static const unsigned kNumBits[4] = { SF_SIZE, SF_OFFSETX, SF_OFFSETY, SF_ALPHA };
+
+/* 「自定义」勾选框字段 -> 对应数值项的 have 位；不是这类字段返回 0 */
+static unsigned CustomBit(int field) {
+    switch (field) {
+    case F_CUSTOM_SIZE:  return SF_SIZE;
+    case F_CUSTOM_OFFX:  return SF_OFFSETX;
+    case F_CUSTOM_OFFY:  return SF_OFFSETY;
+    case F_CUSTOM_ALPHA: return SF_ALPHA;
+    }
+    return 0;
+}
+
 #define PAGE_COUNT  7
 #define PAGE_GLOBAL 5
 #define PAGE_IGNORE 6
 
 /* 逻辑坐标（96 DPI 基准） */
-#define WIN_W      820
+#define WIN_W      860
 #define WIN_H      556
 #define TAB_X      14
 #define TAB_Y      8
@@ -101,8 +121,10 @@ typedef struct {
 } PageDef;
 
 static const PageDef kPages[PAGE_COUNT] = {
-    { L"美式键盘",   { IMEST_US, IMEST_US_CAPS, (ImeState)-1 } },
+    /* 中文输入法排第一：绝大多数人只调它，打开设置默认就落在这一页。
+       其余顺序不变；「全局」「黑名单」必须在最后（PAGE_GLOBAL / PAGE_IGNORE）。 */
     { L"中文输入法", { IMEST_CN_CN, IMEST_CN_EN, IMEST_CN_CAPS } },
+    { L"美式键盘",   { IMEST_US, IMEST_US_CAPS, (ImeState)-1 } },
     { L"日文输入法", { IMEST_JP, IMEST_JP_CAPS, (ImeState)-1 } },
     { L"韩文输入法", { IMEST_KR, IMEST_KR_CAPS, (ImeState)-1 } },
     { L"其他布局",   { IMEST_OTHER, IMEST_OTHER_CAPS, (ImeState)-1 } },
@@ -277,6 +299,105 @@ static void BufEnd(BufDC* b, HDC dc) {
 #define BTN_HOVER_PROP L"IMEIndicatorBtnHover"
 #define CHK_PROP       L"IMEIndicatorCheck"      /* 是自绘复选框 */
 #define CHK_STATE_PROP L"IMEIndicatorCheckState" /* 复选框的勾选状态 */
+#define HINT_PROP      L"IMEIndicatorHint"       /* 悬停说明的文字（静态字面量） */
+#define HINT_CLASS     L"IMEIndicatorHintWnd"
+#define HINT_TIMER     1
+#define HINT_DELAY_MS  400
+
+/* ---------- 悬停说明气泡 ----------
+   自绘控件用不上普通工具提示的那套：comctl32 的 TTF_SUBCLASS 挂在 ownerdraw
+   按钮上不会弹出。这里自己开一个小弹出窗：鼠标停住 400ms 后贴在控件下方，
+   离开或按下就收。文字用静态字面量，窗口只存指针。 */
+static HWND g_hint = NULL;
+
+static void HintHide(void) {
+    if (g_hint) {
+        DestroyWindow(g_hint);
+        g_hint = NULL;
+    }
+}
+
+static LRESULT CALLBACK HintProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        /* 白底 + 1px 灰边，跟界面里其它自绘控件同一套配色（不用系统提示的淡黄） */
+        HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xAD, 0xAD, 0xAD));
+        HGDIOBJ op = SelectObject(dc, pen);
+        HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        Rectangle(dc, 0, 0, rc.right, rc.bottom);
+        SelectObject(dc, op);
+        SelectObject(dc, ob);
+        DeleteObject(pen);
+
+        const WCHAR* t = (const WCHAR*)GetPropW(h, HINT_PROP);
+        if (t) {
+            RECT tr = rc;
+            InflateRect(&tr, -S(10), -S(6));
+            HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+            if (!f) f = BaseFont();
+            HGDIOBJ of = SelectObject(dc, f);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(0x33, 0x33, 0x33));
+            DrawTextW(dc, t, -1, &tr, DT_LEFT | DT_TOP | DT_WORDBREAK);
+            SelectObject(dc, of);
+        }
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static void HintShow(HWND owner, const WCHAR* text) {
+    HintHide();
+    if (!owner || !text) return;
+
+    RECT wr;
+    GetWindowRect(owner, &wr);
+
+    /* 先量文字要多大（宽度有上限，超了自动折行） */
+    int maxW = S(300);
+    RECT calc = { 0, 0, maxW - S(16), 0 };
+    HDC dc = GetDC(NULL);
+    HGDIOBJ of = SelectObject(dc, BaseFont());
+    DrawTextW(dc, text, -1, &calc, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
+    SelectObject(dc, of);
+    ReleaseDC(NULL, dc);
+
+    int w = calc.right + S(10) * 2;
+    int ht = calc.bottom + S(6) * 2;
+    int x = wr.left;
+    int y = wr.bottom + S(4);
+
+    /* 贴边时收回屏幕内；下方不够高就翻到控件上方 */
+    MONITORINFO mi;
+    mi.cbSize = sizeof(mi);
+    HMONITOR mon = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+    if (GetMonitorInfoW(mon, &mi)) {
+        if (y + ht > mi.rcWork.bottom) y = wr.top - S(4) - ht;
+        if (x + w > mi.rcWork.right)   x = mi.rcWork.right - w;
+        if (x < mi.rcWork.left)        x = mi.rcWork.left;
+        if (y < mi.rcWork.top)         y = mi.rcWork.top;
+    }
+
+    g_hint = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, HINT_CLASS, NULL,
+                             WS_POPUP, x, y, w, ht, g_hwnd, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    if (!g_hint) return;
+    SetPropW(g_hint, HINT_PROP, (HANDLE)text);
+    SendMessageW(g_hint, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+    ShowWindow(g_hint, SW_SHOWNOACTIVATE);
+    InvalidateRect(g_hint, NULL, FALSE);
+}
 
 static LRESULT CALLBACK BtnSub(HWND h, UINT m, WPARAM w, LPARAM l,
                                UINT_PTR id, DWORD_PTR ref) {
@@ -285,13 +406,16 @@ static LRESULT CALLBACK BtnSub(HWND h, UINT m, WPARAM w, LPARAM l,
     if (GetPropW(h, CHK_PROP)) {
         if (m == BM_SETCHECK) {
             SetPropW(h, CHK_STATE_PROP, (HANDLE)(INT_PTR)(w == BST_CHECKED ? 1 : 0));
-            InvalidateRect(h, NULL, TRUE);
+            InvalidateRect(h, NULL, FALSE);
             return 0;
         }
         if (m == BM_GETCHECK)
             return GetPropW(h, CHK_STATE_PROP) ? BST_CHECKED : BST_UNCHECKED;
     }
     switch (m) {
+    /* 自绘收全部像素，别让系统先拿类背景刷擦一遍 —— 那层灰底就是悬停闪的源头 */
+    case WM_ERASEBKGND:
+        return 1;
     case WM_MOUSEMOVE:
         if (!GetPropW(h, BTN_HOVER_PROP)) {
             SetPropW(h, BTN_HOVER_PROP, (HANDLE)1);
@@ -301,14 +425,34 @@ static LRESULT CALLBACK BtnSub(HWND h, UINT m, WPARAM w, LPARAM l,
             t.dwFlags = TME_LEAVE;
             t.hwndTrack = h;
             TrackMouseEvent(&t);
-            InvalidateRect(h, NULL, TRUE);
+            InvalidateRect(h, NULL, FALSE);
+        }
+        /* 每次移动都重新计时：停下来才算"悬停"，划过去不弹 */
+        if (GetPropW(h, HINT_PROP) && !g_hint)
+            SetTimer(h, HINT_TIMER, HINT_DELAY_MS, NULL);
+        break;
+    case WM_TIMER:
+        if (w == HINT_TIMER) {
+            KillTimer(h, HINT_TIMER);
+            const WCHAR* t = (const WCHAR*)GetPropW(h, HINT_PROP);
+            if (t && GetPropW(h, BTN_HOVER_PROP) && !g_hint) HintShow(h, t);
+            return 0;
         }
         break;
+    case WM_LBUTTONDOWN:
+        /* 不吞掉消息：按钮还要靠它发 BN_CLICKED */
+        KillTimer(h, HINT_TIMER);
+        HintHide();
+        break;
     case WM_MOUSELEAVE:
+        KillTimer(h, HINT_TIMER);
+        HintHide();
         RemovePropW(h, BTN_HOVER_PROP);
-        InvalidateRect(h, NULL, TRUE);
+        InvalidateRect(h, NULL, FALSE);
         break;
     case WM_NCDESTROY:
+        KillTimer(h, HINT_TIMER);
+        HintHide();
         RemovePropW(h, BTN_HOVER_PROP);
         RemovePropW(h, CHK_STATE_PROP);
         RemoveWindowSubclass(h, BtnSub, id);
@@ -491,10 +635,23 @@ static void ApplySliderValue(int block, int field, int v);
 static int  DefaultFor(int block, int field);
 static void SetSliderValue(int block, int field, int v);
 
+static int SliderPos(HWND s) { return (int)SendMessageW(s, TBM_GETPOS, 0, 0); }
+
+/* 设位置并立刻重画。redraw 一律传 FALSE：让 trackbar 自己失效一次会先擦一遍
+   系统灰底再等我们铺白，拖动时那一下就闪；这里只标记脏区，我们自己画。 */
+static void SetSliderPos(HWND sl, int v) {
+    if (!sl) return;
+    SendMessageW(sl, TBM_SETPOS, FALSE, (LPARAM)v);
+    InvalidateRect(sl, NULL, FALSE);
+}
+
 static void SetNumText(HWND e, int v) {
     if (!e) return;
     WCHAR vb[32];
     _snwprintf_s(vb, 32, _TRUNCATE, L"%d", v);
+    /* 内容没变就别 SetWindowText：编辑框会重画一遍整行文字，滚动时白费 */
+    WCHAR cur[32];
+    if (GetWindowTextW(e, cur, 32) > 0 && wcscmp(cur, vb) == 0) return;
     g_syncEdit = 1;
     SetWindowTextW(e, vb);
     g_syncEdit = 0;
@@ -514,6 +671,11 @@ static void ScaleControls(void) {
    放在这里是因为面板过程要读，而 Block 结构在后面才定义。 */
 static HWND g_imgLabel[3];
 static int  g_imgBad[3];
+
+/* 四个数值项的标签：跟随 cn_cn 时置灰（STATIC 的 EnableWindow 不改字色，
+   所以要在 WM_CTLCOLORSTATIC 里自己换） */
+static HWND g_customLabel[3][4];
+static int  g_customDim[3][4];
 
 static LRESULT CALLBACK PanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -541,6 +703,11 @@ static LRESULT CALLBACK PanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 break;
             }
         }
+        /* 跟随 cn_cn 的项：标签跟滑块一起变灰，一眼看出这行不生效 */
+        for (int i = 0; i < 3; i++)
+            for (int k = 0; k < 4; k++)
+                if (ctl == g_customLabel[i][k] && g_customDim[i][k])
+                    SetTextColor(dc, RGB(0xA0, 0xA0, 0xA0));
         return (LRESULT)g_whiteBrush;
     }
     }
@@ -768,7 +935,7 @@ static LRESULT CALLBACK SelPopupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             HWND owner = g_selOwner;
             CloseSelPopup();
             if (owner) {
-                InvalidateRect(owner, NULL, TRUE);
+                InvalidateRect(owner, NULL, FALSE);
                 SendMessageW(GetParent(owner), WM_COMMAND,
                              MAKEWPARAM(GetDlgCtrlID(owner), CBN_SELCHANGE), (LPARAM)owner);
             }
@@ -809,7 +976,7 @@ static void OpenSelPopup(HWND owner) {
 
     ShowWindow(g_selPopup, SW_SHOWNOACTIVATE);
     SetCapture(g_selPopup);
-    InvalidateRect(g_selPopup, NULL, TRUE);
+    InvalidateRect(g_selPopup, NULL, FALSE);
 }
 
 static LRESULT CALLBACK SelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -836,14 +1003,14 @@ static LRESULT CALLBACK SelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (d && d->count < SEL_MAX_ITEMS) {
             lstrcpynW(d->items[d->count], (const WCHAR*)l, SEL_MAX_TEXT);
             int idx = d->count++;
-            InvalidateRect(h, NULL, TRUE);
+            InvalidateRect(h, NULL, FALSE);
             return idx;
         }
         return CB_ERR;
     case CB_SETCURSEL:
         if (d && (int)w >= 0 && (int)w < d->count) {
             d->sel = (int)w;
-            InvalidateRect(h, NULL, TRUE);
+            InvalidateRect(h, NULL, FALSE);
             return d->sel;
         }
         return CB_ERR;
@@ -861,12 +1028,12 @@ static LRESULT CALLBACK SelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             t.dwFlags = TME_LEAVE;
             t.hwndTrack = h;
             TrackMouseEvent(&t);
-            InvalidateRect(h, NULL, TRUE);
+            InvalidateRect(h, NULL, FALSE);
         }
         return 0;
     case WM_MOUSELEAVE:
         RemovePropW(h, BTN_HOVER_PROP);
-        InvalidateRect(h, NULL, TRUE);
+        InvalidateRect(h, NULL, FALSE);
         return 0;
     case WM_NCDESTROY:
         if (g_selPopup && g_selOwner == h) CloseSelPopup();
@@ -879,64 +1046,99 @@ static LRESULT CALLBACK SelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-/* ---------- 滑块自绘 ----------
+/* ---------- 滑块（自绘 + 自己管拖拽） ----------
    默认 trackbar 是 Win95 的蚀刻槽 + 小方块滑块，和圆角按钮/下划线页签放在
-   一起很割裂。直接接管 WM_PAINT：4px 圆角轨道、已选段蓝色填充、14px 圆形
-   滑块。轨道/滑块位置取控件自己的 TBM_GETCHANNELRECT / TBM_GETTHUMBRECT，
-   画出来的和点得到的是同一套几何。 */
+   一起很割裂。所以槽和圆点都自绘。
+
+   鼠标行为也接管，因为默认 trackbar 拖动的手感有两个"莫名其妙"：
+
+   1. 点轨道不是跳到点到的位置，而是按**页步进**跳（0..255 一页就是 51）；
+   2. 按住圆点边缘时，控件会把圆心强制吸到光标正中 —— 按下的一瞬间
+      值就跳了一段。
+
+   现在的做法：几何只算一份（SliderGeomOf），画出来的圆点就是点得到的圆点；
+   按下时记住"光标相对圆心"的偏移再拖，圆点不会先吸附；点轨道则直接跳到该处。
+   值按像素四舍五入，同一像素内不会来回翻转。
+
+   绘制整块先画进图层（白底也画进图层）再一次贴屏：原来的 _画白底_ -> _画轨道_
+   -> _贴图形_ 是三次往屏幕写，拖动时中间那几帧就是闪的根源。 */
+typedef struct {
+    double xL, xR;     /* 圆点圆心能到达的水平范围 */
+    double cy;         /* 轨道中线 */
+    double trackH;     /* 轨道粗 */
+    double thumbR;     /* 圆点半径 */
+    int    lo, hi;
+} SliderGeom;
+
+static void SliderGeomOf(HWND s, const RECT* rc, SliderGeom* g) {
+    int lo = (int)SendMessageW(s, TBM_GETRANGEMIN, 0, 0);
+    int hi = (int)SendMessageW(s, TBM_GETRANGEMAX, 0, 0);
+    g->lo = lo;
+    g->hi = (hi > lo) ? hi : lo + 1;
+    g->thumbR = S(14) / 2.0;
+    g->trackH = S(4) > 0 ? (double)S(4) : 4.0;
+    g->cy = (rc->top + rc->bottom) / 2.0;
+    g->xL = rc->left + g->thumbR;
+    g->xR = rc->right - g->thumbR;
+    if (g->xR < g->xL + 1.0) g->xR = g->xL + 1.0;
+}
+
+/* 值 -> 圆心横坐标 */
+static double SliderValueX(const SliderGeom* g, int v) {
+    if (v < g->lo) v = g->lo;
+    if (v > g->hi) v = g->hi;
+    double t = (double)(v - g->lo) / (double)(g->hi - g->lo);
+    return g->xL + t * (g->xR - g->xL);
+}
+
+/* 圆心横坐标 -> 值（四舍五入：换算出半像素误差时不会在两个值之间来回跳） */
+static int SliderXValue(const SliderGeom* g, double x) {
+    double t = (x - g->xL) / (g->xR - g->xL);
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    return g->lo + (int)(t * (g->hi - g->lo) + 0.5);
+}
+
 static void PaintSlider(HWND h, HDC dc) {
     RECT rc;
     GetClientRect(h, &rc);
-    HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
-    FillRect(dc, &rc, bg);
-    DeleteObject(bg);
+    int w = rc.right - rc.left, ht = rc.bottom - rc.top;
+    if (w <= 0 || ht <= 0) return;
 
-    RECT ch;
-    RECT th;
-    ZeroMemory(&ch, sizeof(ch));
-    ZeroMemory(&th, sizeof(th));
-    SendMessageW(h, TBM_GETCHANNELRECT, 0, (LPARAM)&ch);
-    SendMessageW(h, TBM_GETTHUMBRECT, 0, (LPARAM)&th);
-    if (ch.right <= ch.left) {
-        ch = rc;
-        int mid = (rc.top + rc.bottom) / 2;
-        ch.top = mid - S(2);
-        ch.bottom = mid + S(2);
-    }
+    SliderGeom g;
+    SliderGeomOf(h, &rc, &g);
+    BOOL on = IsWindowEnabled(h);
+    COLORREF kTrack  = on ? RGB(0xE0, 0xE0, 0xE0) : RGB(0xEC, 0xEC, 0xEC);
+    COLORREF kAccent = on ? RGB(0x00, 0x78, 0xD7) : RGB(0xBC, 0xBC, 0xBC);
 
-    /* 轨道是 4px 的胶囊，圆点直径 14px；几何全部取控件自己算出来的矩形，
-       画出来的和点得到的是同一套位置。 */
-    double th4 = (double)S(4);
-    double cy = (ch.top + ch.bottom) / 2.0;
-    double top = cy - th4 / 2.0, bot = cy + th4 / 2.0;
-    int    hasThumb = (th.right > th.left);
-    double thumbCx = hasThumb ? (th.left + th.right) / 2.0 : (double)ch.left;
-    double thumbR  = hasThumb ? (th.right - th.left) / 2.0 : (double)S(14) / 2.0;
-    int    cx = (int)thumbCx;
+    double cx  = SliderValueX(&g, SliderPos(h));
+    double top = g.cy - g.trackH / 2.0, bot = g.cy + g.trackH / 2.0;
 
-    const COLORREF kTrack  = RGB(0xE0, 0xE0, 0xE0);
-    const COLORREF kAccent = RGB(0x00, 0x78, 0xD7);
-
-    /* 轨道两端、已选段、圆点一起画进同一块图层：GDI 的 Ellipse 在 14px 上
-       锯齿肉眼可见，而悬浮窗里的同一个圆点走 shape.c 的覆盖率光栅化，两边
-       不该一个毛糙一个干净。 */
+    /* 轨道两端、已选段、圆点画进同一块图层，白底也铺在图层里：整块只往屏幕
+       贴一次。GDI 的 Ellipse 在 14px 上锯齿肉眼可见，而悬浮窗里的同一个圆点
+       走 shape.c 的覆盖率光栅化，两边不该一个毛糙一个干净。 */
     UILayer lay;
-    if (UILayerBegin(&lay, dc, rc.right, rc.bottom)) {
-        UIPixRoundRect(lay.px, rc.right, rc.bottom, ch.left, top, ch.right, bot,
-                       th4 / 2.0, RgbToPix(kTrack), 255);
-        if (cx > ch.left)
-            UIPixRoundRect(lay.px, rc.right, rc.bottom, ch.left, top, thumbCx, bot,
-                           th4 / 2.0, RgbToPix(kAccent), 255);
-        UIPixCircle(lay.px, rc.right, rc.bottom, thumbCx, cy, thumbR,
-                    RgbToPix(kAccent), 255);
-        UILayerBlend(&lay, dc, 0, 0);
+    if (UILayerBegin(&lay, dc, w, ht)) {
+        DWORD* px = (DWORD*)lay.px;
+        for (int i = 0; i < w * ht; i++) px[i] = 0xFFFFFFFFu;   /* 不透明白，预乘 */
+        UIPixRoundRect(lay.px, w, ht, g.xL, top, g.xR, bot,
+                       g.trackH / 2.0, RgbToPix(kTrack), 255);
+        if (cx > g.xL)
+            UIPixRoundRect(lay.px, w, ht, g.xL, top, cx, bot,
+                           g.trackH / 2.0, RgbToPix(kAccent), 255);
+        UIPixCircle(lay.px, w, ht, cx, g.cy, g.thumbR, RgbToPix(kAccent), 255);
+        UILayerBlend(&lay, dc, rc.left, rc.top);
         UILayerEnd(&lay);
         return;
     }
 
-    /* 兜底：建不出 DIB 就退回原来的 GDI 硬边画法 */
-    int icy = (int)cy;
-    RECT track = { ch.left, icy - S(2), ch.right, icy + S(2) };
+    /* 兜底：建不出 DIB 就退回 GDI 硬边画法 */
+    HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+
+    int icy = (int)g.cy;
+    RECT track = { (int)g.xL, icy - S(2), (int)g.xR, icy + S(2) };
     HBRUSH gb = CreateSolidBrush(kTrack);
     HPEN gp = CreatePen(PS_SOLID, 1, kTrack);
     HGDIOBJ ob = SelectObject(dc, gb);
@@ -947,12 +1149,13 @@ static void PaintSlider(HWND h, HDC dc) {
     DeleteObject(gb);
     DeleteObject(gp);
 
-    if (cx > track.left) {
+    int icx = (int)(cx + 0.5);
+    if (icx > track.left) {
         HBRUSH bb = CreateSolidBrush(kAccent);
         HPEN bp = CreatePen(PS_SOLID, 1, kAccent);
         ob = SelectObject(dc, bb);
         op = SelectObject(dc, bp);
-        RoundRect(dc, track.left, track.top, cx, track.bottom, S(4), S(4));
+        RoundRect(dc, track.left, track.top, icx, track.bottom, S(4), S(4));
         SelectObject(dc, ob);
         SelectObject(dc, op);
         DeleteObject(bb);
@@ -964,24 +1167,81 @@ static void PaintSlider(HWND h, HDC dc) {
     HPEN p = CreatePen(PS_SOLID, 1, kAccent);
     ob = SelectObject(dc, b);
     op = SelectObject(dc, p);
-    Ellipse(dc, cx - d / 2, icy - d / 2, cx + d / 2, icy + d / 2);
+    Ellipse(dc, icx - d / 2, icy - d / 2, icx + d / 2, icy + d / 2);
     SelectObject(dc, ob);
     SelectObject(dc, op);
     DeleteObject(b);
     DeleteObject(p);
 }
 
+/* 一次拖动只可能有一个滑块在跟（鼠标捕获是全局的），状态就放静态里 */
+static HWND   g_dragSlider = NULL;
+static double g_dragGrab = 0.0;   /* 按下时光标相对圆心的偏移 */
+
+static void SliderDragTo(HWND h, double x) {
+    RECT rc;
+    GetClientRect(h, &rc);
+    SliderGeom g;
+    SliderGeomOf(h, &rc, &g);
+    int v = SliderXValue(&g, x);
+    if (v == SliderPos(h)) return;                 /* 值没变就别重画 */
+    SendMessageW(h, TBM_SETPOS, FALSE, (LPARAM)v);
+    InvalidateRect(h, NULL, FALSE);
+    /* 通知父窗口（面板再转给主窗口），和 trackbar 自己的滚动通知同一套 */
+    SendMessageW(GetParent(h), WM_HSCROLL, MAKEWPARAM(TB_THUMBTRACK, v), (LPARAM)h);
+}
+
 static LRESULT CALLBACK SliderSub(HWND h, UINT m, WPARAM w, LPARAM l,
                                   UINT_PTR id, DWORD_PTR ref) {
     (void)ref;
-    if (m == WM_PAINT) {
+    switch (m) {
+    case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
         PaintSlider(h, dc);
         EndPaint(h, &ps);
         return 0;
     }
-    if (m == WM_NCDESTROY) RemoveWindowSubclass(h, SliderSub, id);
+    case WM_ERASEBKGND:
+        return 1;                   /* 整块自己画：别让系统先擦一层灰底再画白 */
+    case WM_LBUTTONDOWN: {
+        RECT rc;
+        GetClientRect(h, &rc);
+        SliderGeom g;
+        SliderGeomOf(h, &rc, &g);
+        double x = (double)(short)LOWORD(l);
+        double cx = SliderValueX(&g, SliderPos(h));
+        /* 按在圆点上：记住偏移，圆点不会先吸附到光标正中；
+           按在轨道上：直接跳到该处（不做按页步进） */
+        g_dragGrab = (fabs(x - cx) <= g.thumbR + S(2)) ? x - cx : 0.0;
+        g_dragSlider = h;
+        SetFocus(h);
+        SetCapture(h);
+        SliderDragTo(h, x - g_dragGrab);
+        return 0;
+    }
+    case WM_MOUSEMOVE:
+        if (g_dragSlider == h && GetCapture() == h) {
+            SliderDragTo(h, (double)(short)LOWORD(l) - g_dragGrab);
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+        if (g_dragSlider == h) {
+            g_dragSlider = NULL;
+            if (GetCapture() == h) ReleaseCapture();
+            SendMessageW(GetParent(h), WM_HSCROLL, MAKEWPARAM(TB_ENDTRACK, 0), (LPARAM)h);
+            return 0;
+        }
+        break;
+    case WM_CAPTURECHANGED:
+        if (g_dragSlider == h) g_dragSlider = NULL;
+        break;
+    case WM_NCDESTROY:
+        if (g_dragSlider == h) g_dragSlider = NULL;
+        RemoveWindowSubclass(h, SliderSub, id);
+        break;
+    }
     return DefSubclassProc(h, m, w, l);
 }
 
@@ -1019,7 +1279,7 @@ static HWND CSlider(int x, int y, int w, int h, int block, int field,
        lo..lo，滑块就永远卡在最小值。 */
     SendMessageW(c, TBM_SETRANGEMIN, FALSE, (LPARAM)lo);
     SendMessageW(c, TBM_SETRANGEMAX, FALSE, (LPARAM)hi);
-    SendMessageW(c, TBM_SETPOS, TRUE, val);
+    SendMessageW(c, TBM_SETPOS, FALSE, (LPARAM)val);
     SetWindowSubclass(c, SliderSub, 1, 0);
     RegMeta(c, block, field, label, x, y, w, h);
     return c;
@@ -1032,6 +1292,7 @@ typedef struct {
     HWND sep;         /* 块底分隔线：最后一块的分隔线不显示（会变成悬空线） */
     HWND lbl[6];      /* 颜色/形状/尺寸/偏移X/偏移Y/透明度 的静态标签 */
     HWND reset[4];    /* 尺寸/偏移X/偏移Y/透明度 的重置按钮 */
+    HWND custom[4];   /* 尺寸/偏移X/偏移Y/透明度 行首的勾选框（勾上=本状态单独设） */
     HWND slSize, vSize, slOffX, vOffX, slOffY, vOffY, slAlpha, vAlpha;
     HWND transient;
 } Block;
@@ -1042,11 +1303,14 @@ static HWND  g_layoutPanel = NULL;
 static HWND  g_globalPanel = NULL;
 static HWND  g_ignorePanel = NULL;
 
+/* 行首勾选框的悬停说明（静态存储：气泡只存指针）。只讲未勾选时的效果。 */
+static WCHAR kHintCustom[] = L"未勾选时，数值跟随「中文输入法 (cn_cn)」";
+
 static void BuildStateBlock(int i, int y) {
     Block* b = &g_blk[i];
     const int x0 = 14;
     const int lx = x0 + 6;
-    const int rx = x0 + 380;
+    const int rx = x0 + 428;   /* 右列：两列各 398 宽，列间距 24 */
 
     b->title = CLabel(L"", lx, y + 2, 150, 20);
     SendMessageW(b->title, WM_SETFONT, (WPARAM)BoldFont(), TRUE);
@@ -1071,32 +1335,38 @@ static void BuildStateBlock(int i, int y) {
     SendMessageW(b->imgBtn, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
     MakePushButton(b->imgBtn);
     RegMeta(b->imgBtn, i, 0, NULL, rx + 174, y, 76, 22);
-    b->imgLabel = CLabel(L"", rx + 256, y + 4, 150, 20);
+    b->imgLabel = CLabel(L"", rx + 256, y + 4, 140, 20);
     g_imgLabel[i] = b->imgLabel;
     y += 26;
 
-    struct { const WCHAR* nm; int field; int lo, hi; } sl[4] = {
-        { L"尺寸",   F_SIZE,   4,  96 },
-        { L"偏移 X", F_OFFX, -40,  40 },
-        { L"偏移 Y", F_OFFY, -40,  40 },
-        { L"透明度", F_ALPHA,  0, 255 },
+    struct { const WCHAR* nm; int field; int custom; int lo, hi; } sl[4] = {
+        { L"尺寸",   F_SIZE,  F_CUSTOM_SIZE,   4,  96 },
+        { L"偏移 X", F_OFFX,  F_CUSTOM_OFFX, -40,  40 },
+        { L"偏移 Y", F_OFFY,  F_CUSTOM_OFFY, -40,  40 },
+        { L"透明度", F_ALPHA, F_CUSTOM_ALPHA,  0, 255 },
     };
     HWND* psl[4] = { &b->slSize, &b->slOffX, &b->slOffY, &b->slAlpha };
     HWND* pvl[4] = { &b->vSize,  &b->vOffX,  &b->vOffY,  &b->vAlpha };
     for (int k = 0; k < 4; k++) {
         int cx = (k % 2 == 0) ? lx : rx;
         int cy = y + (k / 2) * 23;
-        b->lbl[2 + k] = CLabel(sl[k].nm, cx, cy + 3, 54, 20);
-        *pvl[k] = CEditNum(cx + 244, cy, 48, 22, i, sl[k].field);
-        *psl[k] = CSlider(cx + 56, cy, 184, 22, i, sl[k].field,
+        /* 行首一个**没有文字**的勾选框：不勾 = 跟随中文输入法(cn_cn)的这项值
+           （滑块/数值/重置整行置灰），勾上 = 本状态单独设置。含义靠悬停气泡说明。
+           挂在 block=i 上，整块跟随基础状态时会一起置灰。 */
+        b->custom[k] = CCheck(L"", cx, cy, 18, 22, i, sl[k].custom, 0);
+        SetPropW(b->custom[k], HINT_PROP, (HANDLE)kHintCustom);
+        b->lbl[2 + k] = CLabel(sl[k].nm, cx + 22, cy + 3, 54, 20);
+        g_customLabel[i][k] = b->lbl[2 + k];
+        *pvl[k] = CEditNum(cx + 302, cy, 48, 22, i, sl[k].field);
+        *psl[k] = CSlider(cx + 78, cy, 220, 22, i, sl[k].field,
                           sl[k].lo, sl[k].hi, sl[k].lo, *pvl[k]);
         b->reset[k] = CreateWindowExW(0, L"BUTTON", L"重置",
                                       WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                      cx + 296, cy, 44, 22, P,
+                                      cx + 354, cy, 44, 22, P,
                                       (HMENU)(INT_PTR)(ID_RESET + i * 4 + k), NULL, NULL);
         SendMessageW(b->reset[k], WM_SETFONT, (WPARAM)BaseFont(), TRUE);
         MakePushButton(b->reset[k]);
-        RegMeta(b->reset[k], i, 0, NULL, cx + 296, cy, 44, 22);
+        RegMeta(b->reset[k], i, 0, NULL, cx + 354, cy, 44, 22);
     }
     y += 46;
 
@@ -1123,6 +1393,8 @@ static void HideBlock(int i) {
         if (b->lbl[k]) ShowWindow(b->lbl[k], SW_HIDE);
     for (int k = 0; k < 4; k++)
         if (b->reset[k]) ShowWindow(b->reset[k], SW_HIDE);
+    for (int k = 0; k < 4; k++)
+        if (b->custom[k]) ShowWindow(b->custom[k], SW_HIDE);
     if (b->sep) ShowWindow(b->sep, SW_HIDE);
     g_blkState[i] = (ImeState)-1;
 }
@@ -1139,6 +1411,8 @@ static void ShowBlock(int i) {
         if (b->lbl[k]) ShowWindow(b->lbl[k], SW_SHOW);
     for (int k = 0; k < 4; k++)
         if (b->reset[k]) ShowWindow(b->reset[k], SW_SHOW);
+    for (int k = 0; k < 4; k++)
+        if (b->custom[k]) ShowWindow(b->custom[k], SW_SHOW);
     if (b->sep) ShowWindow(b->sep, SW_SHOW);
     /* 跟随开关只对 caps 状态有意义；非 caps 必须显式隐藏，
        否则会留着上一页的状态继续显示 */
@@ -1168,10 +1442,10 @@ static void FillBlock(int i, ImeState s) {
                  (eff.shape == SHAPE_TRIANGLE) ? 2 :
                  (eff.shape == SHAPE_IMAGE) ? 3 : 1, 0);
 
-    SendMessageW(b->slSize, TBM_SETPOS, TRUE, eff.size);
-    SendMessageW(b->slOffX, TBM_SETPOS, TRUE, eff.offsetX);
-    SendMessageW(b->slOffY, TBM_SETPOS, TRUE, eff.offsetY);
-    SendMessageW(b->slAlpha, TBM_SETPOS, TRUE, eff.alpha);
+    SetSliderPos(b->slSize, eff.size);
+    SetSliderPos(b->slOffX, eff.offsetX);
+    SetSliderPos(b->slOffY, eff.offsetY);
+    SetSliderPos(b->slAlpha, eff.alpha);
     WCHAR vb[64];
     SetNumText(b->vSize, eff.size);
     SetNumText(b->vOffX, eff.offsetX);
@@ -1213,6 +1487,30 @@ static void FillBlock(int i, ImeState s) {
         if (m->field == F_INHERIT || m->field == F_ENABLED) continue;
         EnableWindow(m->hwnd, inherited ? FALSE : TRUE);
         if (m->label) EnableWindow(m->label, inherited ? FALSE : TRUE);
+    }
+
+    /* 行首勾选框：不勾 = 跟随 cn_cn（滑块/数值/重置置灰，标签也变灰）。
+       整块跟随基础状态时轮不到它，cn_cn 自己更是来源 —— 都藏掉。 */
+    int customizable = (s != IMEST_CN_CN) && !inherited;
+    HWND* psl[4] = { &b->slSize, &b->slOffX, &b->slOffY, &b->slAlpha };
+    HWND* pvl[4] = { &b->vSize,  &b->vOffX,  &b->vOffY,  &b->vAlpha };
+    for (int k = 0; k < 4; k++) {
+        if (!b->custom[k]) continue;
+        if (!customizable) {
+            ShowWindow(b->custom[k], SW_HIDE);
+            g_customDim[i][k] = 0;
+            continue;
+        }
+        ShowWindow(b->custom[k], SW_SHOW);
+        int custom = !CfgFieldFollowsCn(&s_cfg, s, kNumBits[k]);
+        SendMessageW(b->custom[k], BM_SETCHECK,
+                     custom ? BST_CHECKED : BST_UNCHECKED, 0);
+        EnableWindow(b->custom[k], TRUE);
+        EnableWindow(*psl[k], custom ? TRUE : FALSE);
+        EnableWindow(*pvl[k], custom ? TRUE : FALSE);
+        EnableWindow(b->reset[k], custom ? TRUE : FALSE);
+        g_customDim[i][k] = custom ? 0 : 1;
+        if (b->lbl[2 + k]) InvalidateRect(b->lbl[2 + k], NULL, FALSE);
     }
 }
 
@@ -1274,10 +1572,10 @@ static void BuildGlobalPanel(void) {
 }
 
 static void FillGlobalPanel(void) {
-    SendMessageW(g_slPoll, TBM_SETPOS, TRUE, s_cfg.pollMs);
-    SendMessageW(g_slTrack, TBM_SETPOS, TRUE, s_cfg.trackMs);
-    SendMessageW(g_slTimeout, TBM_SETPOS, TRUE, s_cfg.caretTimeoutMs);
-    SendMessageW(g_slAutoHide, TBM_SETPOS, TRUE, s_cfg.autoHideMs);
+    SetSliderPos(g_slPoll, s_cfg.pollMs);
+    SetSliderPos(g_slTrack, s_cfg.trackMs);
+    SetSliderPos(g_slTimeout, s_cfg.caretTimeoutMs);
+    SetSliderPos(g_slAutoHide, s_cfg.autoHideMs);
     SetNumText(g_vPoll, s_cfg.pollMs);
     SetNumText(g_vTrack, s_cfg.trackMs);
     SetNumText(g_vTimeout, s_cfg.caretTimeoutMs);
@@ -1416,6 +1714,107 @@ static void BuildPreviewSwitch(HWND parent) {
     SyncPreviewSwitch();
 }
 
+/* 预览条的整块内容。单独拆出来是为了能画进内存位图（双缓冲）：
+   底色、示例文字、光标竖线、圆点分四次往同一块 DC 写，直接画到窗口上时
+   拖动滑块（每次滚动都要重画整个预览条）会看到中间那几帧。 */
+static void PaintPreview(HDC dc, const RECT* prc) {
+    RECT rc = *prc;
+
+    HBRUSH bg = CreateSolidBrush(RGB(0xFA, 0xFA, 0xFA));
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+
+    /* 右侧状态切换的几何：画标签和避让文字都用这一份 */
+    RECT sw, lbl;
+    PreviewSwitchRects(rc.right, rc.bottom, &sw, &lbl);
+
+    int baseY = rc.bottom / 2 + S(2);
+    HFONT old = (HFONT)SelectObject(dc, BaseFont());
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(0x33, 0x33, 0x33));
+    const WCHAR* sample = L"输入法状态";
+    TextOutW(dc, S(16), baseY - S(18), sample, 5);
+    SIZE ts;
+    GetTextExtentPoint32W(dc, sample, 5, &ts);
+
+    int caretX = S(16) + ts.cx;
+    RECT caret = { caretX, baseY - S(18), caretX + S(2), baseY };
+    HBRUSH cb = CreateSolidBrush(RGB(0x22, 0x22, 0x22));
+    FillRect(dc, &caret, cb);
+    DeleteObject(cb);
+    SelectObject(dc, old);
+
+    StateStyle st;
+    CfgStateStyle(&s_cfg, (ImeState)g_selState, &st);
+    if (st.enabled && st.shape != SHAPE_NONE) {
+        int sz = S(st.size);
+        if (sz < 4) sz = 4;
+        if (sz > S(96)) sz = S(96);
+        int x = caretX + S(st.offsetX);
+        int y = baseY + S(st.offsetY);
+
+        int shape = st.shape;
+        ImgView iv = { 0, 0, NULL };
+        int haveImg = 0;
+        if (shape == SHAPE_IMAGE) {
+            if (ImgGet(st.image, sz, &iv, NULL, 0)) haveImg = 1;
+            else shape = SHAPE_CIRCLE;   /* 图片缺失/解码失败：回退圆点 */
+        }
+        int dw = haveImg ? iv.w : sz;
+        int dh = haveImg ? iv.h : sz;
+
+        /* 走和悬浮窗**同一份**光栅化再 AlphaBlend 贴上去：
+           用 GDI 的 Ellipse/Polygon 是无抗锯齿的，预览就会比实际毛糙。 */
+        BITMAPINFO bmi;
+        ZeroMemory(&bmi, sizeof(bmi));
+        bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+        bmi.bmiHeader.biWidth = dw;
+        bmi.bmiHeader.biHeight = -dh;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = NULL;
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = mem ? CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+        if (mem && bmp && bits) {
+            HGDIOBJ oldBmp = SelectObject(mem, bmp);
+            if (haveImg) ImgBlit((BYTE*)bits, &iv, st.alpha);
+            else ShapeRasterize((BYTE*)bits, sz, st.rgb, st.alpha, shape);
+            BLENDFUNCTION bf;
+            bf.BlendOp = AC_SRC_OVER;
+            bf.BlendFlags = 0;
+            bf.SourceConstantAlpha = 255;
+            bf.AlphaFormat = AC_SRC_ALPHA;
+            AlphaBlend(dc, x, y, dw, dh, mem, 0, 0, dw, dh, bf);
+            SelectObject(mem, oldBmp);
+        }
+        if (bmp) DeleteObject(bmp);
+        if (mem) DeleteDC(mem);
+    } else {
+        /* 不显示的状态也要能看出来：否则会以为预览坏了 */
+        RECT hr = { S(16), baseY + S(5), lbl.left - S(12), rc.bottom };
+        if (hr.right > hr.left) {
+            HFONT oldf = (HFONT)SelectObject(dc, BaseFont());
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(0x99, 0x99, 0x99));
+            DrawTextW(dc, L"该状态不显示提示", -1, &hr,
+                      DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+            SelectObject(dc, oldf);
+        }
+    }
+
+    /* 右侧切换的说明文字 */
+    {
+        HFONT oldf = (HFONT)SelectObject(dc, BaseFont());
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(0x66, 0x66, 0x66));
+        DrawTextW(dc, L"预览状态", -1, &lbl,
+                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, oldf);
+    }
+}
+
 static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_CREATE:
@@ -1433,104 +1832,19 @@ static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_COMMAND:            /* 下拉选中：转给主窗口 @see WM_COMMAND */
         return SendMessageW(g_hwnd, m, w, l);
+    case WM_ERASEBKGND:
+        return 1;               /* 底色算在 PaintPreview 里，别擦第二遍 */
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
         RECT rc;
         GetClientRect(h, &rc);
-
-        HBRUSH bg = CreateSolidBrush(RGB(0xFA, 0xFA, 0xFA));
-        FillRect(dc, &rc, bg);
-        DeleteObject(bg);
-
-        /* 右侧状态切换的几何：画标签和避让文字都用这一份 */
-        RECT sw, lbl;
-        PreviewSwitchRects(rc.right, rc.bottom, &sw, &lbl);
-
-        int baseY = rc.bottom / 2 + S(2);
-        HFONT old = (HFONT)SelectObject(dc, BaseFont());
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(0x33, 0x33, 0x33));
-        const WCHAR* sample = L"输入法状态";
-        TextOutW(dc, S(16), baseY - S(18), sample, 5);
-        SIZE ts;
-        GetTextExtentPoint32W(dc, sample, 5, &ts);
-
-        int caretX = S(16) + ts.cx;
-        RECT caret = { caretX, baseY - S(18), caretX + S(2), baseY };
-        HBRUSH cb = CreateSolidBrush(RGB(0x22, 0x22, 0x22));
-        FillRect(dc, &caret, cb);
-        DeleteObject(cb);
-        SelectObject(dc, old);
-
-        StateStyle st;
-        CfgStateStyle(&s_cfg, (ImeState)g_selState, &st);
-        if (st.enabled && st.shape != SHAPE_NONE) {
-            int sz = S(st.size);
-            if (sz < 4) sz = 4;
-            if (sz > S(96)) sz = S(96);
-            int x = caretX + S(st.offsetX);
-            int y = baseY + S(st.offsetY);
-
-            int shape = st.shape;
-            ImgView iv = { 0, 0, NULL };
-            int haveImg = 0;
-            if (shape == SHAPE_IMAGE) {
-                if (ImgGet(st.image, sz, &iv, NULL, 0)) haveImg = 1;
-                else shape = SHAPE_CIRCLE;   /* 图片缺失/解码失败：回退圆点 */
-            }
-            int dw = haveImg ? iv.w : sz;
-            int dh = haveImg ? iv.h : sz;
-
-            /* 走和悬浮窗**同一份**光栅化再 AlphaBlend 贴上去：
-               用 GDI 的 Ellipse/Polygon 是无抗锯齿的，预览就会比实际毛糙。 */
-            BITMAPINFO bmi;
-            ZeroMemory(&bmi, sizeof(bmi));
-            bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-            bmi.bmiHeader.biWidth = dw;
-            bmi.bmiHeader.biHeight = -dh;
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
-
-            void* bits = NULL;
-            HDC mem = CreateCompatibleDC(dc);
-            HBITMAP bmp = mem ? CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
-            if (mem && bmp && bits) {
-                HGDIOBJ oldBmp = SelectObject(mem, bmp);
-                if (haveImg) ImgBlit((BYTE*)bits, &iv, st.alpha);
-                else ShapeRasterize((BYTE*)bits, sz, st.rgb, st.alpha, shape);
-                BLENDFUNCTION bf;
-                bf.BlendOp = AC_SRC_OVER;
-                bf.BlendFlags = 0;
-                bf.SourceConstantAlpha = 255;
-                bf.AlphaFormat = AC_SRC_ALPHA;
-                AlphaBlend(dc, x, y, dw, dh, mem, 0, 0, dw, dh, bf);
-                SelectObject(mem, oldBmp);
-            }
-            if (bmp) DeleteObject(bmp);
-            if (mem) DeleteDC(mem);
+        BufDC buf;
+        if (BufBegin(&buf, dc, rc.right, rc.bottom)) {
+            PaintPreview(buf.mem, &rc);
+            BufEnd(&buf, dc);
         } else {
-            /* 不显示的状态也要能看出来：否则会以为预览坏了 */
-            RECT hr = { S(16), baseY + S(5), lbl.left - S(12), rc.bottom };
-            if (hr.right > hr.left) {
-                HFONT oldf = (HFONT)SelectObject(dc, BaseFont());
-                SetBkMode(dc, TRANSPARENT);
-                SetTextColor(dc, RGB(0x99, 0x99, 0x99));
-                DrawTextW(dc, L"该状态不显示提示", -1, &hr,
-                          DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
-                SelectObject(dc, oldf);
-            }
-        }
-
-        /* 右侧切换的说明文字 */
-        {
-            HFONT oldf = (HFONT)SelectObject(dc, BaseFont());
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, RGB(0x66, 0x66, 0x66));
-            DrawTextW(dc, L"预览状态", -1, &lbl,
-                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(dc, oldf);
+            PaintPreview(dc, &rc);
         }
         EndPaint(h, &ps);
         return 0;
@@ -1540,11 +1854,10 @@ static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 static void InvalidatePreview(void) {
-    if (g_preview) InvalidateRect(g_preview, NULL, TRUE);
+    if (g_preview) InvalidateRect(g_preview, NULL, FALSE);
 }
 
 /* ---------- 提交 ---------- */
-static int SliderPos(HWND s) { return (int)SendMessageW(s, TBM_GETPOS, 0, 0); }
 static int Checked(HWND c) { return SendMessageW(c, BM_GETCHECK, 0, 0) == BST_CHECKED; }
 
 /* 把当前页的控件值写回 s_cfg（用 g_blkState 记住每块当前对应哪个状态） */
@@ -1570,10 +1883,19 @@ static void CommitForm(void) {
                          (sel == 2) ? SHAPE_TRIANGLE :
                          (sel == 3) ? SHAPE_IMAGE : SHAPE_CIRCLE;
             raw->have |= SF_SHAPE;
-            raw->size = SliderPos(b->slSize);     raw->have |= SF_SIZE;
-            raw->offsetX = SliderPos(b->slOffX);  raw->have |= SF_OFFSETX;
-            raw->offsetY = SliderPos(b->slOffY);  raw->have |= SF_OFFSETY;
-            raw->alpha = SliderPos(b->slAlpha);   raw->have |= SF_ALPHA;
+            /* 跟随 cn_cn 的项不能写回：写回去就变成显式值，之后改 cn_cn 不跟了 */
+            if (!CfgFieldFollowsCn(&s_cfg, s, SF_SIZE)) {
+                raw->size = SliderPos(b->slSize);       raw->have |= SF_SIZE;
+            }
+            if (!CfgFieldFollowsCn(&s_cfg, s, SF_OFFSETX)) {
+                raw->offsetX = SliderPos(b->slOffX);    raw->have |= SF_OFFSETX;
+            }
+            if (!CfgFieldFollowsCn(&s_cfg, s, SF_OFFSETY)) {
+                raw->offsetY = SliderPos(b->slOffY);    raw->have |= SF_OFFSETY;
+            }
+            if (!CfgFieldFollowsCn(&s_cfg, s, SF_ALPHA)) {
+                raw->alpha = SliderPos(b->slAlpha);     raw->have |= SF_ALPHA;
+            }
             raw->transient = Checked(b->transient); raw->have |= SF_TRANSIENT;
         }
     } else if (g_page == PAGE_GLOBAL) {
@@ -1624,14 +1946,22 @@ static void RefreshDirty(void) {
     CommitForm();
     g_dirty = !CfgSameValues(&s_cfg, &g_base);
 
+    /* 只在真的变了才动标题与按钮：每次滚动都 SetWindowText/EnableWindow 一遍，
+       即便值没变也会让非客户区与按钮重画，拖动滑块时看起来就是一直在闪。 */
     WCHAR t[96];
     _snwprintf_s(t, 96, _TRUNCATE, L"IMEIndicator 设置%s", g_dirty ? L" *" : L"");
-    SetWindowTextW(g_hwnd, t);
+    WCHAR cur[96];
+    if (GetWindowTextW(g_hwnd, cur, 96) <= 0 || wcscmp(cur, t) != 0)
+        SetWindowTextW(g_hwnd, t);
 
-    HWND b1 = GetDlgItem(g_hwnd, ID_SAVE);
-    HWND b2 = GetDlgItem(g_hwnd, ID_SAVE_RESTART);
-    if (b1) EnableWindow(b1, g_dirty);
-    if (b2) EnableWindow(b2, g_dirty);
+    static int lastDirty = -1;
+    if (lastDirty != g_dirty) {
+        lastDirty = g_dirty;
+        HWND b1 = GetDlgItem(g_hwnd, ID_SAVE);
+        HWND b2 = GetDlgItem(g_hwnd, ID_SAVE_RESTART);
+        if (b1) EnableWindow(b1, g_dirty);
+        if (b2) EnableWindow(b2, g_dirty);
+    }
 }
 
 /* ---------- 保存 / 重启 ---------- */
@@ -1877,6 +2207,33 @@ static void OnCommand(int id, HWND ctl) {
     Meta* m = FindMeta(ctl);
     if (!m || m->block < 0) return;
 
+    /* 尺寸/偏移/透明度 的「自定义」：不勾 = 跟随中文输入法(cn_cn)。
+       勾上时把当前显示的值（cn_cn 的）落成本状态自己的显式值，观感不变；
+       取消勾选则清掉显式位，求值时自然回落到 cn_cn。 */
+    unsigned cbit = CustomBit(m->field);
+    if (cbit) {
+        ImeState s = g_blkState[m->block];
+        if ((int)s < 0) return;
+        StateStyle* raw = &s_cfg.st[s];
+        if (Checked(ctl)) {
+            StateStyle eff;
+            CfgStateStyle(&s_cfg, s, &eff);
+            switch (cbit) {
+            case SF_SIZE:    raw->size = eff.size;       break;
+            case SF_OFFSETX: raw->offsetX = eff.offsetX; break;
+            case SF_OFFSETY: raw->offsetY = eff.offsetY; break;
+            case SF_ALPHA:   raw->alpha = eff.alpha;     break;
+            }
+            raw->have |= cbit;
+        } else {
+            raw->have &= ~cbit;
+        }
+        g_dirty = 1;
+        FillBlock(m->block, s);
+        InvalidatePreview();
+        return;
+    }
+
     /* 颜色按钮：弹系统取色器 */
     if (m->field == F_COLOR) {
         ImeState s = g_blkState[m->block];
@@ -2021,7 +2378,7 @@ static void ApplySliderValue(int block, int field, int v) {
 
     /* 拖动时整条重画：只重画滑块矩形的话，旧滑块位置会留下残影 */
     HWND sl = SliderFor(block, field);
-    if (sl) InvalidateRect(sl, NULL, TRUE);
+    if (sl) InvalidateRect(sl, NULL, FALSE);
 }
 
 /* 重置到默认值：状态字段用 defaults 段，全局字段用出厂值 */
@@ -2047,7 +2404,7 @@ static int DefaultFor(int block, int field) {
 static void SetSliderValue(int block, int field, int v) {
     HWND sl = SliderFor(block, field);
     if (!sl) return;
-    SendMessageW(sl, TBM_SETPOS, TRUE, v);
+    SetSliderPos(sl, v);
     Meta* m = FindMeta(sl);
     if (m && m->label) SetNumText(m->label, v);
     ApplySliderValue(block, field, v);
@@ -2076,7 +2433,7 @@ static void OnNumEditChanged(HWND e) {
     int hi = (int)SendMessageW(sl, TBM_GETRANGEMAX, 0, 0);
     if (v < lo) v = lo;
     if (v > hi) v = hi;
-    SendMessageW(sl, TBM_SETPOS, TRUE, v);
+    SetSliderPos(sl, v);
     ApplySliderValue(m->block, m->field, v);
 }
 
@@ -2186,7 +2543,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             int st = (int)SendMessageW(ctl, BM_GETCHECK, 0, 0);
             SendMessageW(ctl, BM_SETCHECK,
                          st == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
-            InvalidateRect(ctl, NULL, TRUE);
+            InvalidateRect(ctl, NULL, FALSE);
         }
         OnCommand(LOWORD(w), ctl);
         RefreshDirty();
@@ -2317,6 +2674,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
 
     case WM_DESTROY:
+        HintHide();
         if (g_font) { DeleteObject(g_font); g_font = NULL; }
         if (g_fontBold) { DeleteObject(g_fontBold); g_fontBold = NULL; }
         if (g_whiteBrush) { DeleteObject(g_whiteBrush); g_whiteBrush = NULL; }
@@ -2403,6 +2761,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
     pc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     RegisterClassW(&pc);
 
+    {   /* 悬停说明气泡 */
+        WNDCLASSW hc;
+        ZeroMemory(&hc, sizeof(hc));
+        hc.lpfnWndProc = HintProc;
+        hc.hInstance = hInst;
+        hc.lpszClassName = HINT_CLASS;
+        hc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        RegisterClassW(&hc);
+    }
+
     static const WCHAR cls[] = L"IMEIndicatorSettings";
     WNDCLASSW wc;
     ZeroMemory(&wc, sizeof(wc));
@@ -2419,7 +2787,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
     if (g_startupDpi == 0) g_startupDpi = 96;
     int dpi = (int)g_startupDpi;
 
-    DWORD style = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX;
+    /* WS_CLIPCHILDREN：父窗口重画（切页签、悬停高亮、缩放）时不要再涂到子窗口
+       底下去 —— 否则整窗先擦一遍底再让子控件逐个补画，看着就是整片在闪。 */
+    DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX) | WS_CLIPCHILDREN;
     RECT rc = { 0, 0, MulDiv(WIN_W, dpi, 96), MulDiv(WIN_H, dpi, 96) };
     {
         typedef BOOL (WINAPI* PFN_AdjForDpi)(LPRECT, DWORD, BOOL, DWORD, UINT);

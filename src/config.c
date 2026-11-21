@@ -176,14 +176,18 @@ void CfgDefaults(ImeCfg* c) {
                 break;
             }
         }
-        /* 不继承的状态把默认值**物化**进 have：这样首次保存写出的是一份
-           完整快照，将来改内置默认色不会静默影响老用户。
-           继承中的状态保持 have=0，让基础状态说了算。 */
-        if (s->inherit < 0)
-            s->have = SF_ENABLED | SF_COLOR | SF_SHAPE | SF_SIZE |
-                      SF_OFFSETX | SF_OFFSETY | SF_ALPHA | SF_TRANSIENT;
-        else
+        /* 尺寸/偏移/透明度默认跟中文输入法(cn_cn)走：除 cn_cn 自己以外不物化这
+           四个字段，于是改 cn_cn 的那条滑块，所有状态一起变；设置里行首勾选框
+           可以把某一项单独断开（勾上 = 本状态自己设）。
+           颜色/形状仍按状态各自物化 —— 各状态的默认配色本来就不一样，而且
+           "首次保存写出完整快照"的意图只对颜色有意义。 */
+        if (s->inherit < 0) {
+            s->have = SF_ENABLED | SF_COLOR | SF_SHAPE | SF_TRANSIENT;
+            if ((ImeState)i == IMEST_CN_CN)
+                s->have |= SF_SIZE | SF_OFFSETX | SF_OFFSETY | SF_ALPHA;
+        } else {
             s->have = 0;
+        }
     }
     c->ignoreCount = 0;
 }
@@ -208,12 +212,24 @@ void CfgStateStyle(const ImeCfg* c, ImeState s, StateStyle* out) {
     if (!c || !out) return;
     if (s < 0 || s >= IMEST_COUNT) s = IMEST_US;
 
-    /* 从 defaults 起底，再沿继承链往上叠，最后叠自己。
-       链长上限 = IMEST_COUNT，防止 inherit 成环时死循环。 */
+    /* 从 defaults 起底，再叠"跟中文输入法(cn_cn)"的尺寸/偏移/透明度，然后沿
+       继承链往上叠，最后叠自己。
+       求值顺序：状态显式值 > inherit 目标 > cn_cn > defaults。
+       cn_cn 自己是来源，不再往自己身上叠（递归也只有这一层，不会套下去）。 */
     StateStyle acc = c->def;
     acc.have = 0xFFFFFFFFu;   /* 求值结果视为"全都有" */
 
-    /* 收集继承链（从最远祖先到最近），最多 IMEST_COUNT 层 */
+    if (s != IMEST_CN_CN) {
+        StateStyle src;
+        CfgStateStyle(c, IMEST_CN_CN, &src);
+        acc.size = src.size;
+        acc.offsetX = src.offsetX;
+        acc.offsetY = src.offsetY;
+        acc.alpha = src.alpha;
+    }
+
+    /* 收集继承链（从最远祖先到最近），最多 IMEST_COUNT 层：链长上限就是
+       防 inherit 成环时死循环 */
     int chain[IMEST_COUNT];
     int n = 0;
     int cur = c->st[s].inherit;
@@ -238,6 +254,16 @@ void CfgStateStyle(const ImeCfg* c, ImeState s, StateStyle* out) {
     if (!CfgImageNameValid(acc.image)) acc.image[0] = 0;
     acc.inherit = -1;
     *out = acc;
+}
+
+/* 尺寸/偏移/透明度这几项是不是"跟着中文输入法(cn_cn)"：
+   自己没显式设过、也没有整块继承（整块继承时那几项由基础状态说了算）。
+   设置程序据此画每行行首的勾选框：勾着 = 本状态显式值，不勾 = 跟着 cn_cn。 */
+int CfgFieldFollowsCn(const ImeCfg* c, ImeState s, unsigned sfBit) {
+    if (!c || s < 0 || s >= IMEST_COUNT) return 0;
+    if (s == IMEST_CN_CN) return 0;             /* 它就是来源 */
+    if (c->st[s].inherit >= 0) return 0;        /* 整块跟基础状态 */
+    return (c->st[s].have & sfBit) ? 0 : 1;
 }
 
 /* 把"没显式设过"的字段按求值结果补齐。

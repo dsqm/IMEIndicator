@@ -2,12 +2,13 @@
  *
  * 只测最容易出错、又不需要真机交互的部分：
  *   1. JSON 往返：写 -> 读 -> 值不变
- *   2. 缺字段走 defaults
+ *   2. 缺字段走 cn_cn（尺寸/偏移/透明度）或 defaults
  *   3. 继承：caps 状态跟随基础状态；取消跟随后用自己的值
  *   4. 继承成环不死循环
  *   5. 旧 ini 迁移映射（含"色值 0 = 不显示"）
  *   6. 黑名单匹配（大小写、.exe 后缀可选）
- *   7. 加载后未设字段按 defaults 补齐（打开设置不该一上来就是"有改动"）
+ *   7. 加载后未设字段按求值结果补齐（打开设置不该一上来就是"有改动"）
+ *   8. 尺寸/偏移/透明度默认跟随中文输入法(cn_cn)，「自定义」后不再跟
  *
  * 用 exe 同目录的临时文件跑，不碰真实配置 —— 测试可反复执行。
  */
@@ -121,20 +122,29 @@ static void TestRoundTrip(void) {
     CHECK(wcscmp(b.ignore[0], L"somegame") == 0, L"黑名单内容往返");
 }
 
-/* ---------- 2. 缺字段走 defaults ---------- */
+/* ---------- 2. 缺字段走 cn_cn / defaults ---------- */
 static void TestDefaults(void) {
-    wprintf(L"[2] 缺字段走 defaults\n");
+    wprintf(L"[2] 缺字段走 cn_cn / defaults\n");
     ImeCfg c;
     CfgDefaults(&c);
+    c.st[IMEST_CN_CN].size = 33;    c.st[IMEST_CN_CN].have |= SF_SIZE;
+    c.st[IMEST_CN_CN].offsetX = -9; c.st[IMEST_CN_CN].have |= SF_OFFSETX;
+    c.st[IMEST_CN_CN].alpha = 180;  c.st[IMEST_CN_CN].have |= SF_ALPHA;
     /* 模拟一份只有 color 的状态 */
     c.st[IMEST_JP].have = SF_COLOR;
     c.st[IMEST_JP].rgb = 0x111111;
     StateStyle s;
     CfgStateStyle(&c, IMEST_JP, &s);
     CHECK(s.rgb == 0x111111, L"显式颜色生效");
-    CHECK_INT(s.size, c.def.size, L"未设尺寸用 defaults");
-    CHECK_INT(s.offsetX, c.def.offsetX, L"未设偏移用 defaults");
-    CHECK_INT(s.alpha, c.def.alpha, L"未设透明度用 defaults");
+    CHECK_INT(s.size, 33, L"未设尺寸跟随中文输入法");
+    CHECK_INT(s.offsetX, -9, L"未设偏移跟随中文输入法");
+    CHECK_INT(s.alpha, 180, L"未设透明度跟随中文输入法");
+    CHECK_INT(s.offsetY, c.st[IMEST_CN_CN].offsetY, L"未设偏移 Y 跟随中文输入法");
+
+    /* cn_cn 是回落来源，自己不吃这一层：没设的字段仍走 defaults */
+    c.st[IMEST_CN_CN].have &= ~SF_ALPHA;
+    CfgStateStyle(&c, IMEST_CN_CN, &s);
+    CHECK_INT(s.alpha, c.def.alpha, L"cn_cn 未设的字段走 defaults");
 }
 
 /* ---------- 3. 继承 ---------- */
@@ -165,10 +175,12 @@ static void TestInherit(void) {
     CHECK_INT(s.size, 30, L"未覆盖的字段仍跟基础");
 
     /* 断开继承 */
+    c.st[IMEST_CN_CN].size = 26;
+    c.st[IMEST_CN_CN].have |= SF_SIZE;
     c.st[IMEST_US_CAPS].inherit = -1;
     CfgStateStyle(&c, IMEST_US_CAPS, &s);
     CHECK(s.rgb == 0xFF0000, L"断开后保留自己的颜色");
-    CHECK_INT(s.size, c.def.size, L"断开后用 defaults 而不是基础状态");
+    CHECK_INT(s.size, 26, L"断开后尺寸跟中文输入法，而不是基础状态");
 }
 
 /* ---------- 4. 继承成环 ---------- */
@@ -242,7 +254,8 @@ static void TestMaterialize(void) {
     a.def.shape = SHAPE_TRIANGLE;
     a.def.size = 33;
     /* caps 状态默认跟随基础状态；这里取消跟随、只显式设颜色，
-       形状/尺寸应该落到 defaults 段，而不是 raw 里留着的内置初值 */
+       形状落到 defaults 段、尺寸/偏移/透明度落到 cn_cn，而不是 raw 里
+       留着的内置初值 */
     a.st[IMEST_US_CAPS].inherit = -1;
     a.st[IMEST_US_CAPS].have = SF_COLOR;
     a.st[IMEST_US_CAPS].rgb = 0x112233;
@@ -270,6 +283,58 @@ static void TestMaterialize(void) {
     CHECK(eff.size != 77, L"跟随中的状态不读自己的字段");
 }
 
+/* ---------- 8. 尺寸/偏移/透明度跟随中文输入法 ---------- */
+/* 这四项没显式设过时回落到 cn_cn（而不是 defaults）：设置里改一次 cn_cn 的滑块，
+ * 所有状态一起变；某一项想单独调就勾「自定义」，那就是显式值。 */
+static void TestFollowCn(void) {
+    wprintf(L"[8] 尺寸/偏移/透明度跟随中文输入法\n");
+    ImeCfg c;
+    CfgDefaults(&c);
+
+    /* 全新配置：除 cn_cn 自己与整块继承的状态外，都没物化这四项 */
+    for (int i = 0; i < IMEST_COUNT; i++) {
+        if ((ImeState)i == IMEST_CN_CN || c.st[i].inherit >= 0) continue;
+        CHECK(CfgFieldFollowsCn(&c, (ImeState)i, SF_SIZE) == 1, L"全新配置默认跟随");
+    }
+    CHECK(CfgFieldFollowsCn(&c, IMEST_CN_CN, SF_SIZE) == 0, L"cn_cn 自己不算跟随");
+
+    /* 改 cn_cn，别的状态跟着变 */
+    c.st[IMEST_CN_CN].size = 42;  c.st[IMEST_CN_CN].have |= SF_SIZE;
+    c.st[IMEST_CN_CN].alpha = 99; c.st[IMEST_CN_CN].have |= SF_ALPHA;
+    StateStyle us, jp;
+    CfgStateStyle(&c, IMEST_US, &us);
+    CfgStateStyle(&c, IMEST_JP, &jp);
+    CHECK_INT(us.size, 42, L"美式跟随 cn_cn 尺寸");
+    CHECK_INT(jp.alpha, 99, L"日文跟随 cn_cn 透明度");
+
+    /* 勾「自定义」= 显式设过，不再跟 */
+    c.st[IMEST_US].size = 12;
+    c.st[IMEST_US].have |= SF_SIZE;
+    CfgStateStyle(&c, IMEST_US, &us);
+    CHECK_INT(us.size, 12, L"自定义后用自己的值");
+    CHECK(CfgFieldFollowsCn(&c, IMEST_US, SF_SIZE) == 0, L"显式设过就不算跟随");
+    CHECK(CfgFieldFollowsCn(&c, IMEST_US, SF_ALPHA) == 1, L"同状态其它项仍跟随");
+
+    /* 整块继承优先于 cn_cn 回落 */
+    c.st[IMEST_US_CAPS].inherit = IMEST_US;
+    c.st[IMEST_US_CAPS].have = 0;
+    StateStyle caps;
+    CfgStateStyle(&c, IMEST_US_CAPS, &caps);
+    CHECK_INT(caps.size, 12, L"整块继承优先于跟随 cn_cn");
+    CHECK(CfgFieldFollowsCn(&c, IMEST_US_CAPS, SF_SIZE) == 0,
+          L"整块继承时不算跟随 cn_cn");
+
+    /* 落盘：跟随的项不写显式值，读回后还在跟随 */
+    CHECK(CfgSave(&c) == 1, L"CfgSave 成功");
+    ImeCfg d;
+    CfgLoad(&d);
+    CHECK_INT((int)(d.st[IMEST_JP].have & SF_SIZE), 0, L"跟随项不写出显式值");
+    CHECK(CfgFieldFollowsCn(&d, IMEST_JP, SF_SIZE) == 1, L"读回后仍在跟随");
+    StateStyle jp2;
+    CfgStateStyle(&d, IMEST_JP, &jp2);
+    CHECK_INT(jp2.size, 42, L"读回后仍取 cn_cn 的尺寸");
+}
+
 int wmain(void) {
     /* 控制台按 UTF-8 输出：重定向到文件时也是 UTF-8，CI 日志里中文不乱码 */
     SetConsoleOutputCP(CP_UTF8);
@@ -285,6 +350,7 @@ int wmain(void) {
     TestIgnore();
     TestDefaultConfig();
     TestMaterialize();
+    TestFollowCn();
 
     wprintf(L"\n%d passed, %d failed\n", g_pass, g_fail);
     if (g_fail) { wprintf(L"=== FAILED ===\n"); return 1; }
