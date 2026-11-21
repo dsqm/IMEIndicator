@@ -18,8 +18,9 @@ volatile LONG g_showDot = 0;
 #define IDM_RESTART 1001
 #define IDM_EXIT    1002
 #define IDM_LOG     1003
-#define IDM_OPENCFG 1004
+#define IDM_SETTINGS 1004
 #define IDM_GITHUB  1005
+#define IDM_OPENCFGDIR 1006
 
 static HWND  g_trayWnd = NULL;
 static HICON g_icon = NULL;
@@ -92,10 +93,12 @@ static HICON MakeTrayIcon(void) {
 /* ---------- 托盘菜单 ---------- */
 static void ShowTrayMenu(void) {
     HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, IDM_SETTINGS, L"设置…");
+    AppendMenuW(m, MF_STRING, IDM_OPENCFGDIR, L"打开配置文件夹");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_GITHUB, L"打开GitHub仓库");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_LOG, L"记录日志");
-    AppendMenuW(m, MF_STRING, IDM_OPENCFG, L"打开配置");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_RESTART, L"重启程序");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -111,11 +114,71 @@ static void ShowTrayMenu(void) {
     DestroyMenu(m);
 }
 
-/* 用记事本打开配置文件（改完点托盘「重启」生效） */
-static void OpenConfig(void) {
-    WCHAR path[MAX_PATH];
-    CfgPath(path, MAX_PATH);
-    ShellExecuteW(NULL, L"open", L"notepad.exe", path, NULL, SW_SHOWNORMAL);
+/* 启动设置程序。设置程序与主程序同目录，缺失时提示（不影响主程序运行）。 */
+static void OpenSettings(void) {
+    WCHAR dir[MAX_PATH], exe[MAX_PATH];
+    CfgDir(dir, MAX_PATH);
+    _snwprintf_s(exe, MAX_PATH, _TRUNCATE, L"%s\\IMEIndicatorSettings.exe", dir);
+    if (GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxW(NULL,
+                    L"找不到 IMEIndicatorSettings.exe。\n\n"
+                    L"设置程序与主程序放在同一目录即可使用。",
+                    L"IMEIndicator", MB_ICONINFORMATION | MB_OK);
+        return;
+    }
+    /* 不等待：设置程序独立运行，保存后自己调 --restart */
+    ShellExecuteW(NULL, L"open", exe, NULL, dir, SW_SHOWNORMAL);
+}
+
+/* 打开配置所在文件夹（用户想手动看一眼 JSON 时用） */
+static void OpenConfigDir(void) {
+    WCHAR dir[MAX_PATH];
+    CfgDir(dir, MAX_PATH);
+    ShellExecuteW(NULL, L"open", dir, NULL, NULL, SW_SHOWNORMAL);
+}
+
+/* 前台（焦点）程序是否应隐身：命中黑名单，或进程名取不到（受保护进程：
+   内核反作弊游戏、PPL 系统进程等，OpenProcess 被拒）。
+   取不到名宁可隐身也不去碰它 —— IME 检测要跨进程发消息，正是黑名单
+   要规避的卡顿源。按（焦点窗口，PID）缓存判定结果，窗口或进程换了
+   才重新 OpenProcess，同一窗口内连续的检测 tick 全部走缓存。 */
+static HWND  g_bpHwnd    = NULL;
+static DWORD g_bpPid     = 0;
+static int   g_bpBlocked = 0;
+
+static int GetFocusProcessName(HWND focus, WCHAR* out, size_t cap) {
+    if (!focus || !out || cap == 0) return 0;
+    out[0] = 0;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(focus, &pid);
+    if (!pid) return 0;
+    HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hp) return 0;
+    WCHAR exe[MAX_PATH];
+    DWORD sz = MAX_PATH;
+    BOOL ok = QueryFullProcessImageNameW(hp, 0, exe, &sz);
+    CloseHandle(hp);
+    if (!ok || !sz) return 0;
+    WCHAR* fname = exe;
+    for (WCHAR* q = exe; *q; q++) if (*q == L'\\') fname = q + 1;
+    _snwprintf_s(out, cap, _TRUNCATE, L"%s", fname);
+    return out[0] != 0;
+}
+
+static int CfgBlockedForeground(void) {
+    HWND w = ImeFocusedWindow();
+    if (!w) return 0;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    if (!pid) return 0;
+    if (w != g_bpHwnd || pid != g_bpPid) {
+        WCHAR name[MAX_PATH];
+        g_bpBlocked = GetFocusProcessName(w, name, MAX_PATH)
+                      ? CfgIsIgnored(&g_cfg, name) : 1;
+        g_bpHwnd = w;
+        g_bpPid = pid;
+    }
+    return g_bpBlocked;
 }
 
 /* 前台焦点窗口的描述串："[窗口类] 进程名"  —— 诊断哪个程序漂移用 */
@@ -160,12 +223,35 @@ static void SingleInstanceRelease(void) {
     if (g_single) { CloseHandle(g_single); g_single = NULL; }
 }
 
+/* 重启：放掉单实例锁 -> 拉起一个继任者 -> 自己退出。
+   ★ 用 CreateProcessW 而不是 ShellExecuteW：后者要过一遍 shell，实测在
+     某些环境下会在主线程上卡住（检测线程还在跑、主线程永远出不来）。
+     CreateProcess 直接落到底层，行为可预期。 */
 static void RestartApp(void) {
     WCHAR exe[MAX_PATH];
     if (GetModuleFileNameW(NULL, exe, MAX_PATH) > 0) {
+        WCHAR dir[MAX_PATH];
+        _snwprintf_s(dir, MAX_PATH, _TRUNCATE, L"%s", exe);
+        WCHAR* slash = wcsrchr(dir, L'\\');
+        if (slash) *slash = 0;
+
+        WCHAR cmd[MAX_PATH + 4];
+        _snwprintf_s(cmd, MAX_PATH + 4, _TRUNCATE, L"\"%s\"", exe);
+
         /* 先放互斥量再拉继任者：否则继任者抢先建锁、发现自己"已存在"直接退出 */
         SingleInstanceRelease();
-        ShellExecuteW(NULL, L"open", exe, NULL, NULL, SW_SHOWNORMAL);
+
+        STARTUPINFOW si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+        BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi);
+        DbgLog(L"restart: spawn=%d err=%lu", ok ? 1 : 0, ok ? 0UL : GetLastError());
+        if (ok) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
     }
     PostQuitMessage(0);
 }
@@ -182,7 +268,8 @@ static LRESULT CALLBACK TrayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     } else if (m == WM_COMMAND) {
         switch (LOWORD(w)) {
         case IDM_RESTART: RestartApp(); return 0;
-        case IDM_OPENCFG: OpenConfig();  return 0;
+        case IDM_SETTINGS: OpenSettings(); return 0;
+        case IDM_OPENCFGDIR: OpenConfigDir(); return 0;
         case IDM_GITHUB:
             ShellExecuteW(NULL, L"open", L"https://github.com/dsqm/IMEIndicator",
                           NULL, NULL, SW_SHOWNORMAL);
@@ -268,29 +355,34 @@ static const WCHAR* SrcName(CaretSource s) {
 }
 static const WCHAR* StateName(ImeState s) {
     switch (s) {
-    case IMEST_CAPS:   return L"CAPS";
-    case IMEST_KBD_EN: return L"KBD_EN";
-    case IMEST_CN:     return L"CN";
-    case IMEST_JP:     return L"JP";
-    case IMEST_KR:     return L"KR";
-    case IMEST_EN:     return L"EN";
-    default:           return L"?";
-    }
-}/* 各状态对应的圆点颜色；IME_COLOR_NONE = 该状态不显示圆点 */
-static DWORD StateColor(ImeState s) {
-    switch (s) {
-    case IMEST_CAPS:   return g_cfg.capsrgb;
-    case IMEST_KBD_EN: return g_cfg.kbdEnrgb;
-    case IMEST_CN:     return g_cfg.cnrgb;
-    case IMEST_JP:     return g_cfg.jprgb;
-    case IMEST_KR:     return g_cfg.krrgb;
-    default:           return g_cfg.enrgb;
+    case IMEST_US:         return L"US";
+    case IMEST_US_CAPS:    return L"US_CAPS";
+    case IMEST_CN_CN:      return L"CN_CN";
+    case IMEST_CN_EN:      return L"CN_EN";
+    case IMEST_CN_CAPS:    return L"CN_CAPS";
+    case IMEST_JP:         return L"JP";
+    case IMEST_JP_CAPS:    return L"JP_CAPS";
+    case IMEST_KR:         return L"KR";
+    case IMEST_KR_CAPS:    return L"KR_CAPS";
+    case IMEST_OTHER:      return L"OTHER";
+    case IMEST_OTHER_CAPS: return L"OTHER_CAPS";
+    default:               return L"?";
     }
 }
 
-/* 该状态是否走"临时显示"（露一小会儿就收）：AutoHideMs=0 或状态不在名单里 = 常显 */
+/* 该状态是否走"临时显示"（露一小会儿就收）：autoHideMs=0 或状态没开 = 常显 */
 static int StateIsTransient(ImeState s) {
-    return g_cfg.autoHideMs > 0 && (g_cfg.autoHideMask & IME_AH_BIT(s)) != 0;
+    if (g_cfg.autoHideMs <= 0) return 0;
+    StateStyle st;
+    CfgStateStyle(&g_cfg, s, &st);
+    return st.transient;
+}
+
+/* 该状态是否要显示（enabled + 形状不是 none） */
+static int StateVisible(ImeState s) {
+    StateStyle st;
+    CfgStateStyle(&g_cfg, s, &st);
+    return st.enabled && st.shape != SHAPE_NONE;
 }
 
 /* ---------- 检测线程 ---------- */
@@ -307,12 +399,12 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
         SetThreadDescription(GetCurrentThread(), L"detector");
     int pollMs = g_cfg.pollMs, trackMs = g_cfg.trackMs;
     /* 中英模式查询（跨进程 SendMessage）仅在其结果会影响显示时才做：
-       En 与 Cn 至少一个非 0 才查；两个都是 0（都不显示）时跳过，避免卡顿。 */
-    const int needMode = (g_cfg.enrgb != IME_COLOR_NONE || g_cfg.cnrgb != IME_COLOR_NONE);
+       中文输入法的中文/英文两档至少有一个要显示才查；都不显示时跳过，避免卡顿。 */
+    const int needMode = (StateVisible(IMEST_CN_CN) || StateVisible(IMEST_CN_EN));
     ImeSetForcedStrategy(g_cfg.imeStrategy);
     ULONGLONG lastPoll = 0, lastLog = 0;
     int shown = 0;
-    ImeState cur = IMEST_EN;
+    ImeState cur = IMEST_US;
     int wasLogging = 0;
     int wasBlocked = 0;
     WCHAR lastFg[256] = L"";
@@ -392,28 +484,47 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             lastPoll = now;
             ImeState prev = cur;
             int lang = ImeKeyboardLang();
-            /* 大写 / 英文键盘 / 日 / 韩 这四条路不查 IME，pr 标记为"本次没探"。
+            int caps = ImeIsCapsLock();
+            /* 状态求值：布局 × 模式 × Caps。
+               ★ 与旧版的区别：Caps 不再是"盖掉一切"的独立状态，而是每个布局
+               自己的变体 —— 于是「中文输入法 大写」和「美式键盘 大写」可以配成
+               完全不同的样子。
+               这四条路（大写/英文键盘/日/韩）不查 IME，pr 标记为"本次没探"。
                ★ settling 必须一并清零：这些状态由键盘布局直接决定，没有"未定期"。
                不清的话 settling 残留 1 → 释放条件 !pr.settling 永假 → settleGate
                永久闭合 → 圆点从此不再显示（切到这类布局的窗口就触发，重启才恢复）。 */
-            if (ImeIsCapsLock()) { cur = IMEST_CAPS; pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0; }
-            else if (lang < 0)   { /* 没有前台窗口：沿用上次状态，别去查（会读到自己） */ pr.settling = 0; }
-            else if (lang == 0x09) { cur = IMEST_KBD_EN; pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0; }
-            else if (lang == 0x11) { cur = IMEST_JP;     pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0; }
-            else if (lang == 0x12) { cur = IMEST_KR;     pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0; }
-            else if (needMode) {
-                int cn = ImeIsChineseModeEx(&pr);
-                cur = cn ? IMEST_CN : IMEST_EN;
-            } else {
-                cur = IMEST_EN;
-                pr.ok = 0;
-                pr.opened = -1;
-                pr.conv = -1;
+            if (lang < 0) {
+                /* 没有前台窗口：沿用上次状态，别去查（会读到自己） */
                 pr.settling = 0;
+            } else if (lang == 0x09) {          /* 美式键盘 */
+                cur = caps ? IMEST_US_CAPS : IMEST_US;
+                pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
+            } else if (lang == 0x11) {          /* 日文 */
+                cur = caps ? IMEST_JP_CAPS : IMEST_JP;
+                pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
+            } else if (lang == 0x12) {          /* 韩文 */
+                cur = caps ? IMEST_KR_CAPS : IMEST_KR;
+                pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
+            } else if (lang == 0x04) {          /* 中文输入法：要判中英 */
+                if (caps) {
+                    cur = IMEST_CN_CAPS;
+                    pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
+                } else if (needMode) {
+                    int cn = ImeIsChineseModeEx(&pr);
+                    cur = cn ? IMEST_CN_CN : IMEST_CN_EN;
+                } else {
+                    cur = IMEST_CN_CN;
+                    pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
+                }
+            } else {                            /* 其他布局（法/德等） */
+                cur = caps ? IMEST_OTHER_CAPS : IMEST_OTHER;
+                pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
             }
             if (cur != prev) {
                 stateChanged = 1;
-                OverlaySetColor(StateColor(cur), g_cfg.dotAlpha);
+                StateStyle st;
+                CfgStateStyle(&g_cfg, cur, &st);
+                OverlayApply(&st);
                 ahAt = now;                     /* 状态变化 = 一次临时显示的由头 */
             }
         }
@@ -445,9 +556,9 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             ahAt = now;   /* 换窗口/换焦点后放行：哪怕坐标没变，也该让人看一眼当前状态 */
         }
 
-        /* 通用规则：当前状态色为 IME_COLOR_NONE -> 不显示圆点（如 Cn=0 时中文态隐藏）。
+        /* 通用规则：状态被关掉或形状为 none -> 不显示圆点。
            "状态未定"期间同样不显示：宁可这段短暂没有点，也不要先亮错颜色再消失。 */
-        int want = (!settleGate) && (StateColor(cur) != IME_COLOR_NONE);
+        int want = (!settleGate) && StateVisible(cur);
 
         /* 浮窗打字检测：输入法组合窗/候选窗出现即让位。两条判据：
            纯组合期类名（白名单）直判；其余浮动样式窗要求在光标附近 ——
@@ -586,6 +697,26 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     const WCHAR* cmdline = GetCommandLineW();
     if (cmdline && wcsstr(cmdline, L"--log")) InterlockedExchange(&g_logging, 1);
 
+    /* --restart：设置程序保存后调它，让正在跑的实例重启以加载新配置。
+       必须在单实例检查**之前**分流 —— 否则会被自己的互斥体挡掉。
+       退出码约定（设置程序据此决定要不要提示用户手动重启）：
+         0 = 已通知成功，或本来就没有实例在跑（本进程继续正常启动）
+         2 = 有实例在跑但通知失败（典型：设置程序未提权，被 UIPI 拦掉） */
+    if (cmdline && wcsstr(cmdline, L"--restart")) {
+        HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, L"IMEIndicator_SingleInstance");
+        if (h) {
+            CloseHandle(h);
+            HWND w = FindWindowW(L"IMEIndicatorTray", NULL);
+            if (w) {
+                if (!PostMessageW(w, WM_COMMAND, IDM_RESTART, 0)) return 2;
+                return 0;
+            }
+            /* 找不到托盘窗口（可能正在启动中）：没法通知，让设置程序提示手动重启 */
+            return 2;
+        }
+        /* 没有实例在跑：继续正常启动流程 */
+    }
+
     /* --bridge <父pid> <序号>：降权桥子进程。不建托盘、不建浮窗、不抢单例
        —— 它只是"普通权限的自己"，替管理员父进程跑 WPS 的 COM 查询（ROT 按
        完整性级别隔离，父进程自己附不上，见 bridge.c 文件头）。 */
@@ -610,8 +741,12 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     /* 版本号 = 编译日期（构建脚本生成 src/version.h；exe 属性里也能看到） */
     DbgLog(L"IMEIndicator v%s start", IME_VER_W);
 
-    OverlayInit(&g_cfg);        /* 创建悬浮圆点窗口（本线程，走同一消息循环） */
-    OverlaySetColor(StateColor(IMEST_EN), g_cfg.dotAlpha);  /* 首帧色（未变状态前用它） */
+    OverlayInit();              /* 创建悬浮提示窗口（本线程，走同一消息循环） */
+    {   /* 首帧样式（未变状态前用它） */
+        StateStyle st;
+        CfgStateStyle(&g_cfg, IMEST_US, &st);
+        OverlayApply(&st);
+    }
     TrayInstall();
 
     /* 光标查询走独立线程 + 超时：跨进程 UIA/MSAA 调用没有超时参数，前台程序

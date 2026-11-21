@@ -1,26 +1,40 @@
 #include "ime_indicator.h"
 
-/* ================= 悬浮圆点窗口 =================
+/* ================= 悬浮提示窗口 =================
    WS_EX_LAYERED + WS_EX_TRANSPARENT + WS_EX_TOPMOST + WS_EX_NOACTIVATE：
    不抢焦点、不拦鼠标、始终最顶。用 32 位 DIB Section + UpdateLayeredWindow
-   （ULW_ALPHA）画一个抗锯齿实心圆，alpha 为预乘，无 GDI+ 依赖。
+   （ULW_ALPHA）画形状，alpha 为预乘，无 GDI+ 依赖。
 
    追踪间隔只有 15ms，所以：
    - DIB/内存 DC 按尺寸缓存，不再每帧 Create/Delete；
-   - 位置与配色都没变时直接跳过重绘（只在真正变化时才 UpdateLayeredWindow）。 */
+   - 样式与位置都没变时直接跳过重绘（只在真正变化时才 UpdateLayeredWindow）。
+
+   ★ 尺寸/偏移是**逻辑像素**（96 DPI 基准），按**光标所在显示器**的 DPI
+     换算成物理像素。旧版直接用物理像素，150% 屏上 20px 只有 13 逻辑像素，
+     看起来偏小。
+   ★ DPI 在 OverlayMove 里按光标坐标算（不是鼠标坐标）：多显示器混合 DPI
+     时，圆点要跟它实际落在的那块屏走。 */
 
 static HWND    g_hwnd = NULL;
-static int     g_dotSize = 9, g_offX = 2, g_offY = 4;
-static int     g_shape = SHAPE_CIRCLE;  /* SHAPE_CIRCLE / SHAPE_TRIANGLE */
-static BYTE    g_cr = 0xFF, g_cg = 0x00, g_cb = 0x00; /* 当前颜色分量（默认英文红） */
+
+/* 当前样式（逻辑值）与由它换算出的物理值 */
+static StateStyle g_style;
+static int     g_haveStyle = 0;
+
+static int     g_pxSize = 20;
+static int     g_pxOffX = -2;
+static int     g_pxOffY = 4;
+static int     g_shape = SHAPE_CIRCLE;
+static BYTE    g_cr = 0xFF, g_cg = 0x00, g_cb = 0x00;
 static BYTE    g_alpha = 255;
+static UINT    g_lastDpi = 0;
 
 static HDC     g_mem = NULL;
 static HBITMAP g_bmp = NULL;
 static HGDIOBJ g_oldBmp = NULL;
 static void*   g_bits = NULL;
 static int     g_bmpSize = 0;
-static int     g_bmpDirty = 1;   /* 配色/尺寸变了 -> 重算像素 */
+static int     g_bmpDirty = 1;   /* 配色/尺寸/形状变了 -> 重算像素 */
 static int     g_needPaint = 1;  /* 必须再 UpdateLayeredWindow 一次（如重新显示） */
 static int     g_lastX = 0, g_lastY = 0;
 static int     g_havePos = 0;
@@ -30,11 +44,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-void OverlayInit(ImeCfg* c) {
-    g_dotSize = c->size; g_offX = c->offsetX; g_offY = c->offsetY;
-    g_shape = (c->shape == SHAPE_TRIANGLE) ? SHAPE_TRIANGLE : SHAPE_CIRCLE;
-    g_alpha = (BYTE)c->dotAlpha;
-
+void OverlayInit(void) {
     HINSTANCE hi = GetModuleHandleW(NULL);
     static const WCHAR cls[] = L"IMEIndicatorOverlay";
     WNDCLASSW wc;
@@ -44,12 +54,11 @@ void OverlayInit(ImeCfg* c) {
     wc.lpszClassName = cls;
     RegisterClassW(&wc);
 
-    int sz = g_dotSize;
     g_hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
         WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         cls, L"IMEIndicator", WS_POPUP,
-        -100, -100, sz, sz, NULL, NULL, hi, NULL);
+        -100, -100, g_pxSize, g_pxSize, NULL, NULL, hi, NULL);
     if (g_hwnd) {
         /* 初始为全透明占位，避免闪出白块 */
         BLENDFUNCTION bf = { AC_SRC_OVER, 0, 0, AC_SRC_ALPHA };
@@ -79,19 +88,48 @@ void OverlaySetVisible(int visible) {
     g_needPaint = 1;             /* 重新显示后要再贴一次内容 */
 }
 
-void OverlaySetColor(DWORD rgb, DWORD alpha) {
-    BYTE nr = (BYTE)(rgb >> 16), ng = (BYTE)(rgb >> 8), nb = (BYTE)rgb;
-    BYTE na = (BYTE)(alpha & 0xFF);
-    if (nr != g_cr || ng != g_cg || nb != g_cb || na != g_alpha) g_bmpDirty = 1;
-    g_cr = nr; g_cg = ng; g_cb = nb;
-    g_alpha = na;
+/* 逻辑像素 -> 物理像素。dpi=0 时按 96 处理。四舍五入，
+   避免 150% 下 20 被截断成 29。 */
+static int ScaleByDpi(int logical, UINT dpi) {
+    if (dpi == 0) dpi = 96;
+    return (int)(((long long)logical * (long long)dpi + 48) / 96);
+}
+
+static UINT DpiAtPoint(int x, int y) {
+    POINT pt = { x, y };
+    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    if (!mon) return 96;
+    typedef HRESULT (WINAPI* PFN_GetDpiForMonitor)(HMONITOR, int, UINT*, UINT*);
+    static PFN_GetDpiForMonitor pfn = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        HMODULE sh = LoadLibraryW(L"shcore.dll");
+        if (sh) pfn = (PFN_GetDpiForMonitor)GetProcAddress(sh, "GetDpiForMonitor");
+    }
+    if (pfn) {
+        UINT dx = 96, dy = 96;
+        if (SUCCEEDED(pfn(mon, 0 /*MDT_EFFECTIVE_DPI*/, &dx, &dy)) && dx) return dx;
+    }
+    return 96;
+}
+
+void OverlayApply(const StateStyle* st) {
+    if (!st) return;
+    if (g_haveStyle && memcmp(&g_style, st, sizeof(StateStyle)) == 0) {
+        /* 样式没变：不重绘（追踪循环每 15ms 调一次） */
+        return;
+    }
+    g_style = *st;
+    g_haveStyle = 1;
+    g_bmpDirty = 1;
 }
 
 /* 按当前尺寸准备好 DIB Section（尺寸变了才重建） */
 static int EnsureSurface(void) {
-    if (g_mem && g_bmp && g_bits && g_bmpSize == g_dotSize) return 1;
+    if (g_mem && g_bmp && g_bits && g_bmpSize == g_pxSize) return 1;
     FreeSurface();
-    int sz = g_dotSize;
+    int sz = g_pxSize;
     if (sz < 1) sz = 1;
     HDC scr = GetDC(NULL);
     if (!scr) return 0;
@@ -181,10 +219,41 @@ static void PaintDot(void) {
 }
 
 /* sx, baselineY：光标左上角屏幕坐标与光标底缘；窗口落在
-   (sx+offsetX, baselineY+offsetY)，圆居中于窗口。 */
+   (sx+offsetX, baselineY+offsetY)，图形居中于窗口。 */
 void OverlayMove(int screenX, int baselineY) {
-    if (!g_hwnd) return;
-    /* 位置、配色都没变 -> 不重绘（追踪循环每 15ms 调一次，绝大多数是空转） */
+    if (!g_hwnd || !g_haveStyle) return;
+
+    /* 按光标所在显示器换算物理像素（多显示器混合 DPI） */
+    UINT dpi = DpiAtPoint(screenX, baselineY + 1);
+    int pxSize = ScaleByDpi(g_style.size, dpi);
+    if (pxSize < 1) pxSize = 1;
+    if (pxSize > 512) pxSize = 512;
+    int pxOffX = ScaleByDpi(g_style.offsetX, dpi);
+    int pxOffY = ScaleByDpi(g_style.offsetY, dpi);
+
+    int shape = g_style.shape;
+    /* 一期：图片形状还没实现，回退成圆（用该状态的颜色），
+       保证指示器不会因为配置里写了 image 就整个消失。 */
+    if (shape == SHAPE_IMAGE) shape = SHAPE_CIRCLE;
+
+    BYTE nr = (BYTE)(g_style.rgb >> 16);
+    BYTE ng = (BYTE)(g_style.rgb >> 8);
+    BYTE nb = (BYTE)(g_style.rgb);
+    BYTE na = (BYTE)(g_style.alpha & 0xFF);
+
+    if (pxSize != g_pxSize || shape != g_shape ||
+        nr != g_cr || ng != g_cg || nb != g_cb || na != g_alpha ||
+        dpi != g_lastDpi) {
+        g_bmpDirty = 1;
+    }
+    g_pxSize = pxSize;
+    g_pxOffX = pxOffX;
+    g_pxOffY = pxOffY;
+    g_shape = shape;
+    g_cr = nr; g_cg = ng; g_cb = nb; g_alpha = na;
+    g_lastDpi = dpi;
+
+    /* 位置、样式都没变 -> 不重绘（追踪循环每 15ms 调一次，绝大多数是空转） */
     if (!g_bmpDirty && !g_needPaint && g_havePos &&
         screenX == g_lastX && baselineY == g_lastY) return;
     if (!EnsureSurface()) return;
@@ -192,7 +261,7 @@ void OverlayMove(int screenX, int baselineY) {
 
     HDC scr = GetDC(NULL);
     if (!scr) return;
-    POINT dst = { screenX + g_offX, baselineY + g_offY };
+    POINT dst = { screenX + g_pxOffX, baselineY + g_pxOffY };
     POINT src = { 0, 0 };
     SIZE  szw = { g_bmpSize, g_bmpSize };
     BLENDFUNCTION bf;

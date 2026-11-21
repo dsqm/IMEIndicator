@@ -19,63 +19,104 @@
 #pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "advapi32.lib")   /* 进程令牌：OpenProcessToken / GetTokenInformation */
 
-/* 颜色以 0x00RRGGBB 存放（不透明）；透明度统一用 Alpha。
-   ★ "不显示该状态"用哨兵 IME_COLOR_NONE 表示，不能用 0 —— 0 是**黑色**，
-   否则想设成黑色就只能关掉该状态。 */
-#define IME_COLOR_NONE 0xFFFFFFFFu
+/* ================= 状态模型 =================
+   11 个状态 = 键盘布局 × 输入模式 × Caps Lock。
+   旧版把 Caps 做成一个"盖掉一切"的独立状态，导致中文输入法下按 Caps 只能
+   显示一种样式；这里把 Caps 下放成每个布局自己的变体，于是
+   「中文输入法 大写」和「美式键盘 大写」可以配成完全不同的样子。
 
-/* 圆点形状（配置 Shape）：两者都是"尖角朝上"的对称形状，尺寸含义一致
-   —— Size 都是外接方形边长，所以换形状不用重新调大小。 */
-#define SHAPE_CIRCLE   0   /* 实心圆（默认） */
-#define SHAPE_TRIANGLE 1   /* 等边三角形，尖角朝上 */
+   求值顺序（main.c）：Caps 开 -> 该布局的 *_caps；否则按布局判模式。 */
+typedef enum {
+    IMEST_US = 0,      /* 美式键盘 普通                       */
+    IMEST_US_CAPS,     /* 美式键盘 大写                       */
+    IMEST_CN_CN,       /* 中文输入法 中文                     */
+    IMEST_CN_EN,       /* 中文输入法 英文                     */
+    IMEST_CN_CAPS,     /* 中文输入法 大写                     */
+    IMEST_JP,          /* 日文输入法 普通                     */
+    IMEST_JP_CAPS,     /* 日文输入法 大写                     */
+    IMEST_KR,          /* 韩文输入法 普通                     */
+    IMEST_KR_CAPS,     /* 韩文输入法 大写                     */
+    IMEST_OTHER,       /* 其他布局 普通（法/德等非中英日韩）   */
+    IMEST_OTHER_CAPS,  /* 其他布局 大写                       */
+    IMEST_COUNT
+} ImeState;
+
+/* 形状。SHAPE_NONE = 该状态不显示（等价于旧版色值写 0）。
+   SHAPE_IMAGE 二期实现，一期解析但渲染回退成圆。 */
+#define SHAPE_NONE     0
+#define SHAPE_CIRCLE   1   /* 实心圆（默认） */
+#define SHAPE_TRIANGLE 2   /* 等边三角形，尖角朝上 */
+#define SHAPE_IMAGE    3   /* 自定义图片（二期） */
+
+/* 每个状态可单独覆盖的字段。用位掩码记录"这一项用户显式设过"，
+   没设过的才走继承/defaults —— 否则无法区分"用户就是要 20"和"默认是 20"。 */
+#define SF_ENABLED   (1u << 0)
+#define SF_COLOR     (1u << 1)
+#define SF_SHAPE     (1u << 2)
+#define SF_IMAGE     (1u << 3)
+#define SF_SIZE      (1u << 4)
+#define SF_OFFSETX   (1u << 5)
+#define SF_OFFSETY   (1u << 6)
+#define SF_ALPHA     (1u << 7)
+#define SF_TRANSIENT (1u << 8)
+
+#define CFG_MAX_IGNORE 128
+#define CFG_NAME_MAX    64
+#define CFG_PATH_MAX    260
+
+/* 一个状态的样式。尺寸/偏移都是**逻辑像素**（96 DPI 基准），
+   渲染时按光标所在显示器的 DPI 换算成物理像素。 */
+typedef struct {
+    unsigned have;                    /* SF_* 位掩码：哪些字段是显式设过的 */
+    int      enabled;                 /* 0 = 该状态不显示提示               */
+    DWORD    rgb;                     /* 0x00RRGGBB                         */
+    int      shape;                   /* SHAPE_*                            */
+    WCHAR    image[CFG_NAME_MAX];     /* 仅 SHAPE_IMAGE：shapes\ 下的文件名 */
+    int      size;                    /* 长边（逻辑像素）                    */
+    int      offsetX, offsetY;        /* 相对光标左缘/底缘（逻辑像素，+ 右/+ 下） */
+    int      alpha;                   /* 0..255                             */
+    int      transient;               /* 1 = 状态变化后只显示一会儿          */
+    int      inherit;                 /* -1 = 不继承；否则基础状态索引       */
+} StateStyle;
 
 typedef struct {
-    DWORD        cnrgb;   /* 中文输入（默认不显示；设颜色则中文态显示）        */
-    DWORD        enrgb;   /* 英文（默认红色）                                  */
-    DWORD        capsrgb; /* 大写键 Caps Lock（默认蓝色）                      */
-    DWORD        kbdEnrgb;/* 英文键盘布局（默认紫色）                          */
-    DWORD        jprgb;   /* 日文输入法（默认黑色）                            */
-    DWORD        krrgb;   /* 韩文输入法（默认黑色）                            */
-    DWORD        dotAlpha;/* 0..255：圆点不透明度                                */
-    int          size;    /* 圆点直径（像素）                                    */
-    int          shape;    /* SHAPE_CIRCLE / SHAPE_TRIANGLE                      */
-    int          offsetX; /* 相对光标左缘的水平偏移（+ 右）                       */
-    int          offsetY; /* 相对光标底缘的垂直偏移（+ 下）                       */
-    int          pollMs;  /* 状态检测间隔                                        */
-    int          trackMs; /* 光标追踪间隔                                        */
-    int          imeStrategy; /* 中英判定策略：0=自动学习 1=open状态 2=转换模式    */
-    int          hideFullscreen; /* 1=前景窗口全屏时不显示圆点（看视频不遮挡）    */
-    int          hideComposition;/* 1=输入法组合窗显示时隐藏圆点（它贴在光标处）  */
-    int          caretTimeoutMs; /* 单次光标查询最长等待(ms)：超时即放弃本轮，
-                                    前台程序卡住时不让检测线程跟着冻住        */
-    int          autoHideMs;    /* "临时显示"时长(ms)：清单里的状态只显示这么久
-                                    就自动消失；0=不用临时显示（全部常显）      */
-    int          autoHideMask;  /* 参与临时显示的状态集合：1<<ImeState 位掩码    */
-    int          wpsCom;        /* 1=WPS 文字走 Word 对象模型（COM）取光标位置    */
+    /* ---- 全局 ---- */
+    int pollMs;            /* 状态检测间隔(ms)                        */
+    int trackMs;           /* 光标追踪间隔(ms)                        */
+    int imeStrategy;       /* 中英判定策略：0=自动 1=open 2=转换模式    */
+    int caretTimeoutMs;    /* 单次光标查询最长等待(ms)                 */
+    int hideFullscreen;    /* 1=前景全屏时隐藏                        */
+    int hideComposition;   /* 1=输入法组合窗出现时隐藏                 */
+    int wpsCom;            /* 1=WPS 走 Office 对象模型取光标           */
+    int autoHideMs;        /* 临时显示时长(ms)；0=不启用               */
+
+    StateStyle def;                    /* defaults：未覆盖字段的兜底 */
+    StateStyle st[IMEST_COUNT];        /* 每状态覆盖                 */
+
+    WCHAR ignore[CFG_MAX_IGNORE][CFG_NAME_MAX];
+    int   ignoreCount;
 } ImeCfg;
 
 /* 换窗口后，向 IME 问到的仍是**上一个窗口**的值（实测滞后 200~300ms）。
    读数要稳定这么久才算可信 —— ime.c 判稳定、检测线程收圆点共用这时长。 */
 #define IME_SETTLE_MS 200
 
-/* 状态判定结果 */typedef enum {
-    IMEST_EN = 0,      /* 英文（中文输入法的英文档）       */
-    IMEST_CAPS,        /* 大写键 Caps Lock                 */
-    IMEST_KBD_EN,      /* 英文键盘布局                     */
-    IMEST_CN,          /* 中文输入                          */
-    IMEST_JP,          /* 日文输入法（键盘布局主语言 0x11） */
-    IMEST_KR,          /* 韩文输入法（键盘布局主语言 0x12） */
-    IMEST_COUNT
-} ImeState;
-
-/* AutoHideStates 在内存里按位掩码存（每状态 1 位） */
-#define IME_AH_BIT(s) (1u << (int)(s))
-#define IME_AH_ALL    ((1u << (int)IMEST_COUNT) - 1u)
-
 /* ---- config.c ---- */
-void   CfgLoad(ImeCfg* c);      /* 读 IMEIndicator.ini（缺则写模板） */
-void   CfgPath(WCHAR* out, size_t cap); /* 配置文件完整路径（托盘「打开配置」用） */
-int    CfgBlockedForeground(void); /* 前台命中 [Ignore]，或进程名读不到（受保护进程） */
+void   CfgLoad(ImeCfg* c);              /* 读 IMEIndicator.json；缺则迁移 ini 或写默认 */
+int    CfgSave(const ImeCfg* c);        /* 写回 JSON；成功返回 1 */
+void   CfgPath(WCHAR* out, size_t cap); /* 配置文件完整路径 */
+void   CfgDir(WCHAR* out, size_t cap);  /* exe 所在目录（不带尾反斜杠） */
+void   CfgDefaults(ImeCfg* c);          /* 填出厂默认值 */
+/* 把状态 s 的样式解析成最终值（继承链 + defaults），结果写进 out。
+   带环保护：inherit 指回自己/成环时按"不继承"处理。 */
+void   CfgStateStyle(const ImeCfg* c, ImeState s, StateStyle* out);
+const WCHAR* CfgStateName(ImeState s);  /* "cn_cn" 这类 JSON 键名 */
+int    CfgStateFromName(const WCHAR* name); /* 反查；认不出返回 -1 */
+const WCHAR* CfgShapeName(int shape);   /* "circle" / "triangle" / "none" / "image" */
+int    CfgShapeFromName(const WCHAR* name, int def);
+/* 进程名（可带 .exe）是否命中黑名单。纯字符串比较，不碰窗口 API ——
+   设置程序也要用它，所以不能依赖 ime.c。 */
+int    CfgIsIgnored(const ImeCfg* c, const WCHAR* procName);
 
 /* ---- debug.c ---- */
 extern volatile LONG g_logging; /* 托盘「记录日志」开关（1=写 log） */
@@ -151,11 +192,14 @@ int    CaretIsForegroundFullscreen(void); /* 前景窗口是否全屏（日志�
 int    CaretFocusIsFlutterView(void);  /* 焦点控件是否为 Flutter 视图（main.c 组合收起时补"亮一下"用） */
 
 /* ---- overlay.c ---- */
-void   OverlayInit(ImeCfg* c);      /* 创建透明悬浮窗（需在含消息循环的线程）*/
+void   OverlayInit(void);           /* 创建透明悬浮窗（需在含消息循环的线程）*/
 void   OverlayShutdown(void);       /* 销毁窗口                              */
 void   OverlaySetVisible(int visible);
-void   OverlaySetColor(DWORD rgb, DWORD alpha);
+/* 应用一个状态的最终样式。尺寸/偏移是逻辑像素，渲染时按光标所在显示器 DPI 换算。
+   样式没变时内部直接返回，不重建位图。 */
+void   OverlayApply(const StateStyle* st);
 void   OverlayMove(int screenX, int baselineY); /* 移窗 + 重绘 */
+
 /* ---- main.c ---- */
 extern ImeCfg g_cfg;
 extern volatile LONG g_showDot;   /* 由检测线程写，主线程只读 */
