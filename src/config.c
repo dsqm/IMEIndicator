@@ -240,6 +240,32 @@ void CfgStateStyle(const ImeCfg* c, ImeState s, StateStyle* out) {
     *out = acc;
 }
 
+/* 把"没显式设过"的字段按求值结果补齐。
+ *
+ * 为什么要补：raw 里这些字段留的是**内置初值**，而求值时用的是 defaults 段，
+ * 两者可以不同（defaults.shape=triangle 而某状态没设 shape 时，raw 还是
+ * circle）。设置程序回写的是控件上显示的那个值 —— 求值结果，所以不补的话
+ * 一打开设置就被判成"有未保存的修改"，标题带星号、保存按钮亮着。
+ *
+ * 只补 inherit < 0 的状态：跟随中的状态本来就不看自己这几个字段。 */
+static void MaterializeStates(ImeCfg* c) {
+    for (int i = 0; i < IMEST_COUNT; i++) {
+        StateStyle* s = &c->st[i];
+        if (s->inherit >= 0) continue;
+        StateStyle eff;
+        CfgStateStyle(c, (ImeState)i, &eff);
+        if (!(s->have & SF_ENABLED))   s->enabled   = eff.enabled;
+        if (!(s->have & SF_COLOR))     s->rgb       = eff.rgb;
+        if (!(s->have & SF_SHAPE))     s->shape     = eff.shape;
+        if (!(s->have & SF_IMAGE))     lstrcpynW(s->image, eff.image, CFG_NAME_MAX);
+        if (!(s->have & SF_SIZE))      s->size      = eff.size;
+        if (!(s->have & SF_OFFSETX))   s->offsetX   = eff.offsetX;
+        if (!(s->have & SF_OFFSETY))   s->offsetY   = eff.offsetY;
+        if (!(s->have & SF_ALPHA))     s->alpha     = eff.alpha;
+        if (!(s->have & SF_TRANSIENT)) s->transient = eff.transient;
+    }
+}
+
 /* ---------- 颜色解析 ---------- */
 
 static int HexV(WCHAR c) {
@@ -789,24 +815,25 @@ void CfgLoad(ImeCfg* c) {
     WCHAR path[MAX_PATH];
     CfgPath(path, MAX_PATH);
 
-    if (ReadJsonFile(path, c)) return;   /* 有 JSON 就用它 */
-
-    /* 没有 JSON：看看有没有旧 ini 可以迁移 */
-    WCHAR ini[MAX_PATH];
-    IniPath(ini, MAX_PATH);
-    OldIni old;
-    if (ReadOldIni(ini, &old)) {
-        MigrateFromOld(&old, c);
-        CfgSave(c);                       /* 立刻落盘成新格式 */
-        /* 旧文件改名保留，用户想回退还能找到 */
-        WCHAR bak[MAX_PATH];
-        _snwprintf_s(bak, MAX_PATH, _TRUNCATE, L"%s.bak", ini);
-        MoveFileExW(ini, bak, MOVEFILE_REPLACE_EXISTING);
-        return;
+    if (!ReadJsonFile(path, c)) {         /* 有 JSON 就用它 */
+        /* 没有 JSON：看看有没有旧 ini 可以迁移 */
+        WCHAR ini[MAX_PATH];
+        IniPath(ini, MAX_PATH);
+        OldIni old;
+        if (ReadOldIni(ini, &old)) {
+            MigrateFromOld(&old, c);
+            CfgSave(c);                       /* 立刻落盘成新格式 */
+            /* 旧文件改名保留，用户想回退还能找到 */
+            WCHAR bak[MAX_PATH];
+            _snwprintf_s(bak, MAX_PATH, _TRUNCATE, L"%s.bak", ini);
+            MoveFileExW(ini, bak, MOVEFILE_REPLACE_EXISTING);
+        } else {
+            /* 全新安装：写一份默认配置，方便用户出问题时查看 */
+            CfgSave(c);
+        }
     }
 
-    /* 全新安装：写一份默认配置，方便用户出问题时查看 */
-    CfgSave(c);
+    MaterializeStates(c);
 }
 
 /* ---------- 黑名单 ---------- */

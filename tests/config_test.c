@@ -7,6 +7,7 @@
  *   4. 继承成环不死循环
  *   5. 旧 ini 迁移映射（含"色值 0 = 不显示"）
  *   6. 黑名单匹配（大小写、.exe 后缀可选）
+ *   7. 加载后未设字段按 defaults 补齐（打开设置不该一上来就是"有改动"）
  *
  * 用 exe 同目录的临时文件跑，不碰真实配置 —— 测试可反复执行。
  */
@@ -231,6 +232,44 @@ static void TestDefaultConfig(void) {
     CHECK(c.st[IMEST_US_CAPS].inherit == IMEST_US, L"美式大写默认跟随美式");
 }
 
+/* ---------- 7. 加载后 raw 与求值结果一致 ---------- */
+/* 设置程序回写的是"控件上显示的值"（求值结果）。未显式设过的字段如果 raw
+ * 还留着内置初值，打开设置就会被判成有改动 —— 标题带星号、保存按钮亮着。 */
+static void TestMaterialize(void) {
+    wprintf(L"[7] 未设字段按 defaults 补齐\n");
+    ImeCfg a, b;
+    CfgDefaults(&a);
+    a.def.shape = SHAPE_TRIANGLE;
+    a.def.size = 33;
+    /* caps 状态默认跟随基础状态；这里取消跟随、只显式设颜色，
+       形状/尺寸应该落到 defaults 段，而不是 raw 里留着的内置初值 */
+    a.st[IMEST_US_CAPS].inherit = -1;
+    a.st[IMEST_US_CAPS].have = SF_COLOR;
+    a.st[IMEST_US_CAPS].rgb = 0x112233;
+    a.st[IMEST_US_CAPS].shape = SHAPE_NONE;
+    a.st[IMEST_US_CAPS].size = 20;
+    CHECK(CfgSave(&a) == 1, L"CfgSave 成功");
+    CfgLoad(&b);
+    StateStyle eff;
+    CfgStateStyle(&b, IMEST_US_CAPS, &eff);
+    CHECK_INT(eff.shape, SHAPE_TRIANGLE, L"求值使用 defaults 形状");
+    CHECK_INT(b.st[IMEST_US_CAPS].shape, eff.shape, L"未设形状已按求值结果补齐");
+    CHECK_INT(b.st[IMEST_US_CAPS].size, eff.size, L"未设尺寸已按求值结果补齐");
+    CHECK(b.st[IMEST_US_CAPS].rgb == 0x112233, L"显式颜色不被覆盖");
+
+    /* 跟随中的状态不补齐：它本来就不读自己这几个字段 */
+    CfgDefaults(&a);
+    a.st[IMEST_US_CAPS].inherit = IMEST_US;
+    a.st[IMEST_US_CAPS].have = 0;
+    a.st[IMEST_US_CAPS].size = 77;      /* 垃圾值，不该被信任 */
+    CHECK(CfgSave(&a) == 1, L"CfgSave 成功（继承）");
+    CfgLoad(&b);
+    CHECK_INT(b.st[IMEST_US_CAPS].inherit, IMEST_US, L"继承关系保留");
+    CHECK_INT(b.st[IMEST_US_CAPS].have, 0, L"跟随中的状态不被物化");
+    CfgStateStyle(&b, IMEST_US_CAPS, &eff);
+    CHECK(eff.size != 77, L"跟随中的状态不读自己的字段");
+}
+
 int wmain(void) {
     /* 控制台按 UTF-8 输出：重定向到文件时也是 UTF-8，CI 日志里中文不乱码 */
     SetConsoleOutputCP(CP_UTF8);
@@ -245,6 +284,7 @@ int wmain(void) {
     TestCycle();
     TestIgnore();
     TestDefaultConfig();
+    TestMaterialize();
 
     wprintf(L"\n%d passed, %d failed\n", g_pass, g_fail);
     if (g_fail) { wprintf(L"=== FAILED ===\n"); return 1; }
