@@ -1,6 +1,7 @@
 #include "ime_indicator.h"
 #include "shape.h"
 #include "image.h"
+#include "uipaint.h"
 #include <stdio.h>
 #include <wchar.h>
 #include <stdlib.h>
@@ -36,6 +37,7 @@
 #define ID_DEL_IGNORE   104
 #define ID_PICK_IMAGE   110   /* 110..112：三个状态块各一个「图片…」按钮 */
 #define ID_RESET        120   /* 120..135：每项数值一个「重置」按钮 */
+#define ID_PREVIEW_STATE 140  /* 预览条右侧的状态切换 */
 
 #define F_ENABLED   1
 #define F_INHERIT   2
@@ -72,12 +74,18 @@ static const int kGlobalFields[4] = { F_POLL, F_TRACK, F_TIMEOUT, F_AUTOHIDE };
 #define PREVIEW_X  14
 #define PREVIEW_Y  42
 #define PREVIEW_H  66
+/* 预览条右侧的状态切换（下拉 + 左边的说明文字） */
+#define PREVIEW_SW_W      160
+#define PREVIEW_SW_H      24
+#define PREVIEW_LBL_W     56
+#define PREVIEW_SW_MARGIN 10
 #define CONTENT_Y  116
 #define BOTTOM_H   44
 
 static ImeCfg  s_cfg;
 static HWND    g_hwnd = NULL;
 static HWND    g_preview = NULL;
+static HWND    g_swState = NULL;   /* 预览的状态切换下拉（预览条的子窗口） */
 static int     g_page = 0;
 static int     g_selState = 0;
 static HFONT   g_font = NULL;
@@ -168,6 +176,64 @@ static HFONT BoldFont(void) {
     return g_fontBold;
 }
 
+/* ---------- 抗锯齿小工具 ----------
+   GDI 的 RoundRect/Ellipse/LineTo 是硬边光栅化，圆角和圆形在高 DPI 下会露出
+   台阶（滑块圆点尤其明显）。所有圆角/圆形/粗线都改走 uipaint 的覆盖率图层，
+   内部还是同一个 HDC，只是先画进 DIB 再整块贴上去。 */
+static DWORD RgbToPix(COLORREF c) {
+    return ((DWORD)GetRValue(c) << 16) | ((DWORD)GetGValue(c) << 8) | (DWORD)GetBValue(c);
+}
+
+/* 圆角矩形：先按边色画整块，再按填充色画内缩 1px 的内芯 —— 两层都有抗锯齿，
+   边线不会因为缩放变成虚线。建不出 DIB 时退回 GDI 硬边，功能优先。 */
+static void PaintRoundRectAA(HDC dc, const RECT* rc, int radius,
+                             COLORREF border, COLORREF fill) {
+    int w = rc->right - rc->left, h = rc->bottom - rc->top;
+    if (w <= 0 || h <= 0) return;
+    UILayer lay;
+    if (UILayerBegin(&lay, dc, w, h)) {
+        UIPixRoundRect(lay.px, w, h, 0, 0, w, h, radius, RgbToPix(border), 255);
+        UIPixRoundRect(lay.px, w, h, 1, 1, w - 1, h - 1,
+                       radius > 1 ? radius - 1 : radius, RgbToPix(fill), 255);
+        UILayerBlend(&lay, dc, rc->left, rc->top);
+        UILayerEnd(&lay);
+        return;
+    }
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HBRUSH br = CreateSolidBrush(fill);
+    HGDIOBJ op = SelectObject(dc, pen);
+    HGDIOBJ ob = SelectObject(dc, br);
+    RoundRect(dc, rc->left, rc->top, rc->right, rc->bottom, radius * 2, radius * 2);
+    SelectObject(dc, op);
+    SelectObject(dc, ob);
+    DeleteObject(pen);
+    DeleteObject(br);
+}
+
+/* 抗锯齿粗线（下拉箭头这种小折线） */
+static void PaintLineAA(HDC dc, POINT a, POINT b, double halfWidth, COLORREF c) {
+    int pad = (int)(halfWidth + 1.5);
+    int x0 = (a.x < b.x ? a.x : b.x) - pad;
+    int y0 = (a.y < b.y ? a.y : b.y) - pad;
+    int x1 = (a.x > b.x ? a.x : b.x) + pad;
+    int y1 = (a.y > b.y ? a.y : b.y) + pad;
+    UILayer lay;
+    if (UILayerBegin(&lay, dc, x1 - x0, y1 - y0)) {
+        UIPixCapsule(lay.px, x1 - x0, y1 - y0,
+                     a.x - x0, a.y - y0, b.x - x0, b.y - y0,
+                     halfWidth, RgbToPix(c), 255);
+        UILayerBlend(&lay, dc, x0, y0);
+        UILayerEnd(&lay);
+        return;
+    }
+    HPEN pen = CreatePen(PS_SOLID, (int)(halfWidth * 2), c);
+    HGDIOBJ op = SelectObject(dc, pen);
+    MoveToEx(dc, a.x, a.y, NULL);
+    LineTo(dc, b.x, b.y);
+    SelectObject(dc, op);
+    DeleteObject(pen);
+}
+
 /* ---------- 自绘按钮 ----------
    参考 CapsEnhance 设置程序的观感：圆角、主按钮蓝底白字、次按钮浅底灰边，
    悬停淡蓝、按下加深。系统默认按钮是 Win95 的浮凸方块，和现在的页签/预览
@@ -253,16 +319,7 @@ static void PaintPushButton(const DRAWITEMSTRUCT* di) {
     }
 
     int rad = S(4);
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
-    HBRUSH br = CreateSolidBrush(fill);
-    HGDIOBJ open = SelectObject(di->hDC, pen);
-    HGDIOBJ obr = SelectObject(di->hDC, br);
-    RoundRect(di->hDC, rc.left, rc.top, rc.right - 1, rc.bottom - 1,
-              rad * 2, rad * 2);
-    SelectObject(di->hDC, open);
-    SelectObject(di->hDC, obr);
-    DeleteObject(pen);
-    DeleteObject(br);
+    PaintRoundRectAA(di->hDC, &rc, rad, border, fill);
 
     WCHAR txt[96];
     GetWindowTextW(h, txt, 96);
@@ -307,27 +364,49 @@ static void PaintCheck(const DRAWITEMSTRUCT* di) {
         border = hover ? RGB(0x00, 0x78, 0xD7) : RGB(0xAD, 0xAD, 0xAD);
     }
 
-    HBRUSH b = CreateSolidBrush(fill);
-    HPEN p = CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ ob = SelectObject(di->hDC, b);
-    HGDIOBJ op = SelectObject(di->hDC, p);
-    RoundRect(di->hDC, br.left, br.top, br.right, br.bottom, S(6), S(6));
-    SelectObject(di->hDC, ob);
-    SelectObject(di->hDC, op);
-    DeleteObject(b);
-    DeleteObject(p);
+    /* 方块和对勾一起画进同一块图层，只贴一次 */
+    int lw = rc.right - rc.left, lh = rc.bottom - rc.top;
+    int lx = br.left - rc.left, ly = br.top - rc.top;
+    int rad = box * 3 / 16;                 /* 96 DPI 下 16px 方块圆角 3px */
+    UILayer lay;
+    if (lw > 0 && lh > 0 && UILayerBegin(&lay, di->hDC, lw, lh)) {
+        UIPixRoundRect(lay.px, lw, lh, lx, ly, lx + box, ly + box,
+                       rad, RgbToPix(border), 255);
+        UIPixRoundRect(lay.px, lw, lh, lx + 1, ly + 1, lx + box - 1, ly + box - 1,
+                       rad > 1 ? rad - 1 : rad, RgbToPix(fill), 255);
+        if (checked) {
+            double hw = S(2) / 2.0;         /* 96 DPI 下笔画宽 2px */
+            DWORD white = RgbToPix(RGB(0xFF, 0xFF, 0xFF));
+            UIPixCapsule(lay.px, lw, lh, lx + S(4), ly + S(8),
+                         lx + S(7), ly + S(11), hw, white, 255);
+            UIPixCapsule(lay.px, lw, lh, lx + S(7), ly + S(11),
+                         lx + S(12), ly + S(5), hw, white, 255);
+        }
+        UILayerBlend(&lay, di->hDC, 0, 0);
+        UILayerEnd(&lay);
+    } else {
+        HBRUSH b = CreateSolidBrush(fill);
+        HPEN p = CreatePen(PS_SOLID, 1, border);
+        HGDIOBJ ob = SelectObject(di->hDC, b);
+        HGDIOBJ op = SelectObject(di->hDC, p);
+        RoundRect(di->hDC, br.left, br.top, br.right, br.bottom, S(6), S(6));
+        SelectObject(di->hDC, ob);
+        SelectObject(di->hDC, op);
+        DeleteObject(b);
+        DeleteObject(p);
 
-    if (checked) {
-        HPEN cp = CreatePen(PS_SOLID, S(2), RGB(0xFF, 0xFF, 0xFF));
-        HGDIOBJ oc = SelectObject(di->hDC, cp);
-        POINT pts[3] = {
-            { br.left + S(4),  br.top + S(8) },
-            { br.left + S(7),  br.top + S(11) },
-            { br.left + S(12), br.top + S(5) },
-        };
-        Polyline(di->hDC, pts, 3);
-        SelectObject(di->hDC, oc);
-        DeleteObject(cp);
+        if (checked) {
+            HPEN cp = CreatePen(PS_SOLID, S(2), RGB(0xFF, 0xFF, 0xFF));
+            HGDIOBJ oc = SelectObject(di->hDC, cp);
+            POINT pts[3] = {
+                { br.left + S(4),  br.top + S(8) },
+                { br.left + S(7),  br.top + S(11) },
+                { br.left + S(12), br.top + S(5) },
+            };
+            Polyline(di->hDC, pts, 3);
+            SelectObject(di->hDC, oc);
+            DeleteObject(cp);
+        }
     }
 
     WCHAR txt[128];
@@ -507,7 +586,7 @@ static HWND CEditNum(int x, int y, int w, int h, int block, int field) {
    这里自绘：闭合态是圆角框 + 当前项 + 右侧箭头，点开弹出一份圆角列表
    （悬停高亮、当前项蓝色文字）。
    对外仍认 CB_ADDSTRING / CB_SETCURSEL / CB_GETCURSEL，调用处不用改。 */
-#define SEL_MAX_ITEMS 8
+#define SEL_MAX_ITEMS 16
 #define SEL_MAX_TEXT  32
 #define SEL_ITEM_H    26
 #define SEL_CLASS     L"IMEIndicatorSelect"
@@ -547,23 +626,16 @@ static void SelPaint(HWND h, HDC dc) {
     BOOL hover = enabled && GetPropW(h, BTN_HOVER_PROP) != NULL;
     COLORREF border = !enabled ? RGB(0xD0, 0xD0, 0xD0)
                     : hover ? RGB(0x00, 0x78, 0xD7) : RGB(0xAD, 0xAD, 0xAD);
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ op = SelectObject(dc, pen);
-    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    RoundRect(dc, rc.left, rc.top, rc.right - 1, rc.bottom - 1, S(6), S(6));
-    SelectObject(dc, op);
-    SelectObject(dc, ob);
-    DeleteObject(pen);
+    RECT brc = { rc.left, rc.top, rc.right, rc.bottom };
+    PaintRoundRectAA(dc, &brc, S(3), border, RGB(0xFF, 0xFF, 0xFF));
 
     int ax = rc.right - S(16), ay = (rc.top + rc.bottom) / 2;
-    HPEN ap = CreatePen(PS_SOLID, S(2),
-                        enabled ? RGB(0x54, 0x54, 0x54) : RGB(0xB0, 0xB0, 0xB0));
-    HGDIOBJ oa = SelectObject(dc, ap);
-    MoveToEx(dc, ax - S(4), ay - S(2), NULL);
-    LineTo(dc, ax, ay + S(2));
-    LineTo(dc, ax + S(4), ay - S(2));
-    SelectObject(dc, oa);
-    DeleteObject(ap);
+    COLORREF ac = enabled ? RGB(0x54, 0x54, 0x54) : RGB(0xB0, 0xB0, 0xB0);
+    POINT a1 = { ax - S(4), ay - S(2) };
+    POINT a2 = { ax, ay + S(2) };
+    POINT a3 = { ax + S(4), ay - S(2) };
+    PaintLineAA(dc, a1, a2, S(2) / 2.0, ac);
+    PaintLineAA(dc, a2, a3, S(2) / 2.0, ac);
 
     if (d && d->count > 0) {
         HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
@@ -592,13 +664,8 @@ static LRESULT CALLBACK SelPopupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         FillRect(dc, &rc, bg);
         DeleteObject(bg);
 
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xAD, 0xAD, 0xAD));
-        HGDIOBJ op = SelectObject(dc, pen);
-        HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        RoundRect(dc, 0, 0, rc.right - 1, rc.bottom - 1, S(8), S(8));
-        SelectObject(dc, op);
-        SelectObject(dc, ob);
-        DeleteObject(pen);
+        RECT brd = { 0, 0, rc.right, rc.bottom };
+        PaintRoundRectAA(dc, &brd, S(4), RGB(0xAD, 0xAD, 0xAD), RGB(0xFF, 0xFF, 0xFF));
 
         HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
         if (!f) f = BaseFont();
@@ -772,27 +839,55 @@ static void PaintSlider(HWND h, HDC dc) {
         ch.bottom = mid + S(2);
     }
 
-    int cy = (ch.top + ch.bottom) / 2;
-    int th4 = S(4);
-    RECT track = { ch.left, cy - th4 / 2, ch.right, cy + th4 / 2 };
-    int cx = (th.right > th.left) ? (th.left + th.right) / 2 : track.left;
+    /* 轨道是 4px 的胶囊，圆点直径 14px；几何全部取控件自己算出来的矩形，
+       画出来的和点得到的是同一套位置。 */
+    double th4 = (double)S(4);
+    double cy = (ch.top + ch.bottom) / 2.0;
+    double top = cy - th4 / 2.0, bot = cy + th4 / 2.0;
+    int    hasThumb = (th.right > th.left);
+    double thumbCx = hasThumb ? (th.left + th.right) / 2.0 : (double)ch.left;
+    double thumbR  = hasThumb ? (th.right - th.left) / 2.0 : (double)S(14) / 2.0;
+    int    cx = (int)thumbCx;
 
-    HBRUSH gb = CreateSolidBrush(RGB(0xE0, 0xE0, 0xE0));
-    HPEN gp = CreatePen(PS_SOLID, 1, RGB(0xE0, 0xE0, 0xE0));
+    const COLORREF kTrack  = RGB(0xE0, 0xE0, 0xE0);
+    const COLORREF kAccent = RGB(0x00, 0x78, 0xD7);
+
+    /* 轨道两端、已选段、圆点一起画进同一块图层：GDI 的 Ellipse 在 14px 上
+       锯齿肉眼可见，而悬浮窗里的同一个圆点走 shape.c 的覆盖率光栅化，两边
+       不该一个毛糙一个干净。 */
+    UILayer lay;
+    if (UILayerBegin(&lay, dc, rc.right, rc.bottom)) {
+        UIPixRoundRect(lay.px, rc.right, rc.bottom, ch.left, top, ch.right, bot,
+                       th4 / 2.0, RgbToPix(kTrack), 255);
+        if (cx > ch.left)
+            UIPixRoundRect(lay.px, rc.right, rc.bottom, ch.left, top, thumbCx, bot,
+                           th4 / 2.0, RgbToPix(kAccent), 255);
+        UIPixCircle(lay.px, rc.right, rc.bottom, thumbCx, cy, thumbR,
+                    RgbToPix(kAccent), 255);
+        UILayerBlend(&lay, dc, 0, 0);
+        UILayerEnd(&lay);
+        return;
+    }
+
+    /* 兜底：建不出 DIB 就退回原来的 GDI 硬边画法 */
+    int icy = (int)cy;
+    RECT track = { ch.left, icy - S(2), ch.right, icy + S(2) };
+    HBRUSH gb = CreateSolidBrush(kTrack);
+    HPEN gp = CreatePen(PS_SOLID, 1, kTrack);
     HGDIOBJ ob = SelectObject(dc, gb);
     HGDIOBJ op = SelectObject(dc, gp);
-    RoundRect(dc, track.left, track.top, track.right, track.bottom, th4, th4);
+    RoundRect(dc, track.left, track.top, track.right, track.bottom, S(4), S(4));
     SelectObject(dc, ob);
     SelectObject(dc, op);
     DeleteObject(gb);
     DeleteObject(gp);
 
     if (cx > track.left) {
-        HBRUSH bb = CreateSolidBrush(RGB(0x00, 0x78, 0xD7));
-        HPEN bp = CreatePen(PS_SOLID, 1, RGB(0x00, 0x78, 0xD7));
+        HBRUSH bb = CreateSolidBrush(kAccent);
+        HPEN bp = CreatePen(PS_SOLID, 1, kAccent);
         ob = SelectObject(dc, bb);
         op = SelectObject(dc, bp);
-        RoundRect(dc, track.left, track.top, cx, track.bottom, th4, th4);
+        RoundRect(dc, track.left, track.top, cx, track.bottom, S(4), S(4));
         SelectObject(dc, ob);
         SelectObject(dc, op);
         DeleteObject(bb);
@@ -800,11 +895,11 @@ static void PaintSlider(HWND h, HDC dc) {
     }
 
     int d = S(14);
-    HBRUSH b = CreateSolidBrush(RGB(0x00, 0x78, 0xD7));
-    HPEN p = CreatePen(PS_SOLID, 1, RGB(0x00, 0x78, 0xD7));
+    HBRUSH b = CreateSolidBrush(kAccent);
+    HPEN p = CreatePen(PS_SOLID, 1, kAccent);
     ob = SelectObject(dc, b);
     op = SelectObject(dc, p);
-    Ellipse(dc, cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2);
+    Ellipse(dc, cx - d / 2, icy - d / 2, cx + d / 2, icy + d / 2);
     SelectObject(dc, ob);
     SelectObject(dc, op);
     DeleteObject(b);
@@ -1159,8 +1254,99 @@ static void FillIgnorePanel(void) {
 }
 
 /* ---------- 预览窗口 ---------- */
+
+/* 预览的状态切换：11 个状态都能看，不然预览永远只有当前页第一个状态。
+   下拉沿用自绘的 SEL_CLASS，挂在预览条自己身上 —— 几何跟着预览走，缩放时
+   不用主窗口再摆一次。 */
+static ImeState PreviewStateAt(int idx) {
+    int n = 0;
+    for (int p = 0; p < 5; p++) {
+        for (int k = 0; k < 3; k++) {
+            ImeState s = kPages[p].states[k];
+            if ((int)s < 0) continue;
+            if (n++ == idx) return s;
+        }
+    }
+    return IMEST_US;
+}
+
+static int PreviewIndexOf(ImeState s) {
+    int n = 0;
+    for (int p = 0; p < 5; p++) {
+        for (int k = 0; k < 3; k++) {
+            ImeState t = kPages[p].states[k];
+            if ((int)t < 0) continue;
+            if (t == s) return n;
+            n++;
+        }
+    }
+    return -1;
+}
+
+/* 标签与下拉的几何；画标签、摆控件共用一份，避免两边错位 */
+static void PreviewSwitchRects(int cw, int ch, RECT* sw, RECT* lbl) {
+    int w = S(PREVIEW_SW_W), h = S(PREVIEW_SW_H);
+    int x = cw - S(PREVIEW_SW_MARGIN) - w;
+    int y = (ch - h) / 2;
+    sw->left = x;
+    sw->top = y;
+    sw->right = x + w;
+    sw->bottom = y + h;
+    lbl->right = x - S(8);
+    lbl->left = lbl->right - S(PREVIEW_LBL_W);
+    lbl->top = y;
+    lbl->bottom = y + h;
+}
+
+static void SyncPreviewSwitch(void) {
+    if (!g_swState) return;
+    int idx = PreviewIndexOf((ImeState)g_selState);
+    if (idx >= 0) SendMessageW(g_swState, CB_SETCURSEL, (WPARAM)idx, 0);
+}
+
+static void BuildPreviewSwitch(HWND parent) {
+    g_swState = CreateWindowExW(0, SEL_CLASS, NULL,
+                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                                0, 0, 10, 10, parent,
+                                (HMENU)(INT_PTR)ID_PREVIEW_STATE, NULL, NULL);
+    if (!g_swState) return;
+    SelData* d = (SelData*)calloc(1, sizeof(SelData));
+    if (d) {
+        d->sel = 0;
+        d->hot = -1;
+        SetWindowLongPtrW(g_swState, GWLP_USERDATA, (LONG_PTR)d);
+    }
+    SendMessageW(g_swState, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+    for (int p = 0; p < 5; p++) {
+        for (int k = 0; k < 3; k++) {
+            ImeState s = kPages[p].states[k];
+            if ((int)s < 0) continue;
+            WCHAR t[SEL_MAX_TEXT];
+            _snwprintf_s(t, SEL_MAX_TEXT, _TRUNCATE, L"%s · %s",
+                         kPages[p].name, StateLabel(s));
+            SendMessageW(g_swState, CB_ADDSTRING, 0, (LPARAM)t);
+        }
+    }
+    SyncPreviewSwitch();
+}
+
 static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
+    case WM_CREATE:
+        BuildPreviewSwitch(h);
+        return 0;
+    case WM_SIZE: {
+        RECT pr;
+        GetClientRect(h, &pr);
+        RECT sw, lbl;
+        PreviewSwitchRects(pr.right, pr.bottom, &sw, &lbl);
+        if (g_swState)
+            SetWindowPos(g_swState, HWND_TOP, sw.left, sw.top,
+                         sw.right - sw.left, sw.bottom - sw.top, SWP_NOACTIVATE);
+        return 0;
+    }
+    case WM_COMMAND:            /* 下拉选中：转给主窗口 @see WM_COMMAND */
+        return SendMessageW(g_hwnd, m, w, l);
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
@@ -1170,6 +1356,10 @@ static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         HBRUSH bg = CreateSolidBrush(RGB(0xFA, 0xFA, 0xFA));
         FillRect(dc, &rc, bg);
         DeleteObject(bg);
+
+        /* 右侧状态切换的几何：画标签和避让文字都用这一份 */
+        RECT sw, lbl;
+        PreviewSwitchRects(rc.right, rc.bottom, &sw, &lbl);
 
         int baseY = rc.bottom / 2 + S(2);
         HFONT old = (HFONT)SelectObject(dc, BaseFont());
@@ -1234,6 +1424,27 @@ static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             if (bmp) DeleteObject(bmp);
             if (mem) DeleteDC(mem);
+        } else {
+            /* 不显示的状态也要能看出来：否则会以为预览坏了 */
+            RECT hr = { S(16), baseY + S(5), lbl.left - S(12), rc.bottom };
+            if (hr.right > hr.left) {
+                HFONT oldf = (HFONT)SelectObject(dc, BaseFont());
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, RGB(0x99, 0x99, 0x99));
+                DrawTextW(dc, L"该状态不显示提示", -1, &hr,
+                          DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+                SelectObject(dc, oldf);
+            }
+        }
+
+        /* 右侧切换的说明文字 */
+        {
+            HFONT oldf = (HFONT)SelectObject(dc, BaseFont());
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(0x66, 0x66, 0x66));
+            DrawTextW(dc, L"预览状态", -1, &lbl,
+                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(dc, oldf);
         }
         EndPaint(h, &ps);
         return 0;
@@ -1424,7 +1635,11 @@ static void SwitchPage(int page) {
     if (page < 0 || page >= PAGE_COUNT || page == g_page) return;
     CommitForm();                     /* 先把当前页的值收回去 */
     g_page = page;
-    if (page < 5) g_selState = (int)kPages[page].states[0];
+    if (page < 5) {
+        /* 切页时预览跟着落到本页第一个状态；之后可以再用下拉挑别的 */
+        g_selState = (int)kPages[page].states[0];
+        SyncPreviewSwitch();
+    }
     ShowPage(page);
 }
 
@@ -1465,14 +1680,9 @@ static void PaintTabs(HDC dc) {
             FillRect(dc, &ul, b);
             DeleteObject(b);
         } else if (i == g_hotTab) {
-            HBRUSH hb = CreateSolidBrush(RGB(0xE5, 0xF1, 0xFB));
-            HGDIOBJ ob = SelectObject(dc, hb);
-            HGDIOBJ opn = SelectObject(dc, GetStockObject(NULL_PEN));
-            RoundRect(dc, r.left + 1, r.top + 1, r.right - 1, r.bottom - 1,
-                      S(8), S(8));
-            SelectObject(dc, opn);
-            SelectObject(dc, ob);
-            DeleteObject(hb);
+            RECT hr = { r.left + 1, r.top + 1, r.right - 1, r.bottom - 1 };
+            COLORREF hc = RGB(0xE5, 0xF1, 0xFB);
+            PaintRoundRectAA(dc, &hr, S(4), hc, hc);
         }
         /* 选中页不加粗：粗体只留给段头，切换时文字宽度不跳 */
         SetTextColor(dc, i == g_page ? RGB(0x00, 0x5A, 0x9E)
@@ -1802,9 +2012,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (g_dpi <= 0) g_dpi = 96;
         g_whiteBrush = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
 
-        /* 预览 */
+        /* 预览：WS_CLIPCHILDREN 是必须的 —— 状态切换下拉是它的子窗口，
+           铺底色时不能盖掉 */
         g_preview = CreateWindowExW(WS_EX_CLIENTEDGE, L"IMEIndicatorPreview", NULL,
-            WS_CHILD | WS_VISIBLE, 0, 0, 100, 100, h, NULL, NULL, NULL);
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, 0, 100, 100,
+            h, NULL, NULL, NULL);
 
         /* 底部按钮（常驻，不随页销毁） */
         {
@@ -1838,6 +2050,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         ScaleControls();
         g_page = 0;
         g_selState = (int)kPages[0].states[0];
+        SyncPreviewSwitch();
         ShowPage(0);
         RefreshDirty();          /* 初始无改动：保存按钮置灰，标题不带星号 */
         return 0;
@@ -1871,6 +2084,15 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_COMMAND: {
         int code = HIWORD(w);
         HWND ctl = (HWND)l;
+        /* 预览的状态切换：只看不改配置，不能影响脏标记 */
+        if (code == CBN_SELCHANGE && ctl && ctl == g_swState) {
+            ImeState s = PreviewStateAt((int)SendMessageW(ctl, CB_GETCURSEL, 0, 0));
+            if ((int)s >= 0 && (int)s != g_selState) {
+                g_selState = (int)s;
+                InvalidatePreview();
+            }
+            return 0;
+        }
         if (code == EN_CHANGE)    { OnNumEditChanged(ctl); RefreshDirty(); return 0; }
         if (code == EN_KILLFOCUS) { OnNumEditDone(ctl); RefreshDirty(); return 0; }
         if (code == BN_CLICKED && GetPropW(ctl, CHK_PROP)) {
@@ -1949,16 +2171,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         FillRect(di->hDC, &di->rcItem, bg);
         DeleteObject(bg);
 
-        HBRUSH b = CreateSolidBrush(RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF));
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xAD, 0xAD, 0xAD));
-        HGDIOBJ ob = SelectObject(di->hDC, b);
-        HGDIOBJ op = SelectObject(di->hDC, pen);
-        RoundRect(di->hDC, di->rcItem.left, di->rcItem.top,
-                  di->rcItem.right - 1, di->rcItem.bottom - 1, S(6), S(6));
-        SelectObject(di->hDC, ob);
-        SelectObject(di->hDC, op);
-        DeleteObject(b);
-        DeleteObject(pen);
+        PaintRoundRectAA(di->hDC, &di->rcItem, S(3), RGB(0xAD, 0xAD, 0xAD),
+                         RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF));
         return TRUE;
     }
 

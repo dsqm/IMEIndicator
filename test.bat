@@ -54,6 +54,26 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem ---- settings UI painting: coverage AA, premultiplied layer, AlphaBlend ----
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
+   /Foobj\test\ ^
+   tests\uipaint_test.c src\uipaint.c ^
+   /link /OUT:obj\test\uipaint_test.exe ^
+   user32.lib gdi32.lib msimg32.lib ^
+   /SUBSYSTEM:CONSOLE
+if errorlevel 1 (
+    echo [ERROR] uipaint_test build failed
+    popd
+    exit /b 1
+)
+
+obj\test\uipaint_test.exe
+if errorlevel 1 (
+    echo [ERROR] uipaint tests failed
+    popd
+    exit /b 1
+)
+
 rem ---- image shapes: WIC decode, aspect scaling, import dedup ----
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Foobj\test\ ^

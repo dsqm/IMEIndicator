@@ -64,7 +64,7 @@ rem Separate exe on purpose: the main program usually runs elevated, and the
 rem settings must be able to start unelevated to write the portable config.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Foobj\ ^
-   src\settings.c src\config.c src\json.c src\shape.c src\image.c ^
+   src\settings.c src\config.c src\json.c src\shape.c src\image.c src\uipaint.c ^
    /link /OUT:bin/IMEIndicatorSettings.exe ^
    user32.lib gdi32.lib msimg32.lib shell32.lib comctl32.lib comdlg32.lib ole32.lib oleaut32.lib advapi32.lib windowscodecs.lib ^
    /SUBSYSTEM:WINDOWS
