@@ -767,12 +767,22 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     }
 
     /* 已有一个实例在跑：不能静默退出 —— 双击第二次时什么都不发生，看起来就是
-       "程序没启动"。这里给一条明确反馈，顺带提示托盘图标可能被 Win11 折叠了。 */
+       "程序没启动"。这里给一条明确反馈，并顺带提供操作入口：托盘图标在某些
+       环境下挂不上（任务栏拒绝注册），那时这是唯一能打开设置/退出的地方。 */
     if (!SingleInstanceAcquire()) {
-        MessageBoxW(NULL,
+        int r = MessageBoxW(NULL,
                     L"IMEIndicator 已经在运行。\n\n"
+                    L"是：打开设置\n"
+                    L"否：退出正在运行的实例\n"
+                    L"取消：关闭本提示\n\n"
                     L"如果任务栏右下角看不到它的图标，点一下那里的 ^ 展开隐藏的托盘图标。",
-                    L"IMEIndicator", MB_ICONINFORMATION | MB_OK);
+                    L"IMEIndicator", MB_YESNOCANCEL | MB_ICONINFORMATION);
+        if (r == IDYES) {
+            OpenSettings();
+        } else if (r == IDNO) {
+            HWND w = FindWindowW(L"IMEIndicatorTray", NULL);
+            if (w) PostMessageW(w, WM_COMMAND, IDM_EXIT, 0);
+        }
         return 0;
     }
 
