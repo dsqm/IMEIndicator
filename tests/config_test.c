@@ -48,6 +48,7 @@ static void TestRoundTrip(void) {
     a.hideComposition = 0;
     a.wpsCom = 0;
     a.autoHideMs = 2500;
+    a.settingsWidth = 1000;
 
     a.def.size = 33;
     a.def.offsetX = -7;
@@ -107,6 +108,7 @@ static void TestRoundTrip(void) {
     CHECK_INT(b.hideComposition, 0, L"hideComposition 往返");
     CHECK_INT(b.wpsCom, 0, L"wpsCom 往返");
     CHECK_INT(b.autoHideMs, 2500, L"autoHideMs 往返");
+    CHECK_INT(b.settingsWidth, 1000, L"设置窗口宽度往返");
     CHECK_INT(b.def.size, 33, L"def.size 往返");
     CHECK_INT(b.def.offsetX, -7, L"def.offsetX 往返");
     CHECK_INT(b.def.alpha, 200, L"def.alpha 往返");
@@ -242,6 +244,8 @@ static void TestDefaultConfig(void) {
     /* 默认 caps 跟随基础状态 */
     CHECK(c.st[IMEST_CN_CAPS].inherit == IMEST_CN_CN, L"中文大写默认跟随中文");
     CHECK(c.st[IMEST_US_CAPS].inherit == IMEST_US, L"美式大写默认跟随美式");
+    /* 窗口宽度没拖过时是 0（老配置里没有这个字段，读出来也是 0） */
+    CHECK_INT(c.settingsWidth, 0, L"设置窗口宽度默认 0");
 }
 
 /* ---------- 7. 加载后 raw 与求值结果一致 ---------- */

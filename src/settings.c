@@ -36,6 +36,7 @@
 #define ID_CLOSE        102
 #define ID_ADD_IGNORE   103
 #define ID_DEL_IGNORE   104
+#define ID_RESET_ALL    105   /* 把所有配置项恢复出厂默认 */
 #define ID_PICK_IMAGE   110   /* 110..112：三个状态块各一个「图片…」按钮 */
 #define ID_RESET        120   /* 120..135：每项数值一个「重置」按钮 */
 #define ID_PREVIEW_STATE 140  /* 预览条右侧的状态切换 */
@@ -113,6 +114,8 @@ static HBRUSH  g_whiteBrush = NULL;
 static int     g_dirty = 0;
 static int     g_dpi = 96;
 static UINT    g_startupDpi = 96;
+static int     g_loadedWidth = 0;   /* 启动时从配置里恢复的窗口宽度（逻辑像素） */
+static int     g_widthDirty = 0;    /* 用户改过窗口宽度：关闭时补写进配置 */
 
 /* ---------- 页定义 ---------- */
 typedef struct {
@@ -161,6 +164,22 @@ static int CapsBase(ImeState s) {
 static int S(int v) {
     if (g_dpi <= 0) g_dpi = 96;
     return MulDiv(v, g_dpi, 96);
+}
+
+/* 客户区尺寸 -> 整窗尺寸（含标题栏/边框）。按传入 DPI 算：AdjustWindowRectEx
+   用的是系统 DPI，150%/175% 屏上会把最小尺寸算小。 */
+static void ClientToWindowSize(RECT* rc, DWORD style, DWORD exstyle, UINT dpi) {
+    typedef BOOL (WINAPI* PFN_AdjForDpi)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    static PFN_AdjForDpi pfn = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        HMODULE u = GetModuleHandleW(L"user32.dll");
+        if (u) pfn = (PFN_AdjForDpi)GetProcAddress(u, "AdjustWindowRectExForDpi");
+    }
+    BOOL ok = FALSE;
+    if (pfn) ok = pfn(rc, style, FALSE, exstyle, dpi);
+    if (!ok) AdjustWindowRectEx(rc, style, FALSE, exstyle);
 }
 
 static HFONT g_fontBold = NULL;
@@ -1964,6 +1983,16 @@ static void RefreshDirty(void) {
     }
 }
 
+/* 窗口宽度属于界面状态，不是配置项：单独补写一次，不把界面上没保存的改动
+   带出去 —— 重新读盘、只改这一个字段、写回。 */
+static void SaveSettingsWidth(int w) {
+    ImeCfg tmp;
+    CfgLoad(&tmp);
+    if (tmp.settingsWidth == w) return;
+    tmp.settingsWidth = w;
+    CfgSave(&tmp);
+}
+
 /* ---------- 保存 / 重启 ---------- */
 static void DoSave(int restart) {
     CommitForm();
@@ -2161,8 +2190,27 @@ static void PickImage(int block) {
     InvalidatePreview();
 }
 
+/* 恢复出厂默认：只改内存里的配置，界面立刻反映；点「保存」才写盘，
+   直接关窗口等于没重置。窗口宽度是界面状态，不参与重置。 */
+static void ResetAll(void) {
+    if (MessageBoxW(g_hwnd,
+                    L"把所有设置恢复为默认值？\n\n"
+                    L"恢复后要点「保存」才会写入配置文件；直接关闭窗口不改动。",
+                    L"恢复默认值",
+                    MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES)
+        return;
+    RECT cr;
+    GetClientRect(g_hwnd, &cr);
+    int keepW = MulDiv(cr.right, 96, g_dpi > 0 ? g_dpi : 96);
+    CfgDefaults(&s_cfg);
+    s_cfg.settingsWidth = keepW;
+    ShowPage(g_page);        /* 重填当前页（含预览） */
+    RefreshDirty();
+}
+
 /* ---------- 命令处理 ---------- */
 static void OnCommand(int id, HWND ctl) {
+    if (id == ID_RESET_ALL) { ResetAll(); return; }
     if (id >= ID_RESET && id < ID_RESET + 16) {
         int k = id - ID_RESET;
         int block = (k < 12) ? k / 4 : -1;
@@ -2477,6 +2525,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                                 0, 0, 10, 10, h, (HMENU)(INT_PTR)ID_CLOSE, NULL, NULL);
             SendMessageW(b, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
             MakePushButton(b);
+            /* 恢复默认值：靠左放，跟右下角的提交类按钮分开，免得误点 */
+            b = CreateWindowExW(0, L"BUTTON", L"恢复默认值", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                0, 0, 10, 10, h, (HMENU)(INT_PTR)ID_RESET_ALL, NULL, NULL);
+            SendMessageW(b, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+            MakePushButton(b);
         }
 
         /* 三个页面板：全部建好，切页只改显隐 */
@@ -2511,16 +2564,36 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         int bh = S(28);
         int by = rc.bottom - S(BOTTOM_H) + (S(BOTTOM_H) - bh) / 2;
+        HWND b0 = GetDlgItem(h, ID_RESET_ALL);
         HWND b1 = GetDlgItem(h, ID_SAVE);
         HWND b2 = GetDlgItem(h, ID_SAVE_RESTART);
         HWND b3 = GetDlgItem(h, ID_CLOSE);
-        /* 三个按钮统一靠右：保存 / 保存并重启 / 退出 */
+        /* 左侧一个「恢复默认值」，右侧 Submit 那组靠右：保存 / 保存并重启 / 退出 */
+        if (b0) SetWindowPos(b0, HWND_TOP, S(14), by, S(96), bh, SWP_NOACTIVATE);
         int bx3 = rc.right - S(14) - S(84);
         int bx2 = bx3 - S(8) - S(116);
         int bx1 = bx2 - S(8) - S(84);
         if (b1) SetWindowPos(b1, HWND_TOP, bx1, by, S(84), bh, SWP_NOACTIVATE);
         if (b2) SetWindowPos(b2, HWND_TOP, bx2, by, S(116), bh, SWP_NOACTIVATE);
         if (b3) SetWindowPos(b3, HWND_TOP, bx3, by, S(84), bh, SWP_NOACTIVATE);
+
+        /* 记住窗口宽度（存逻辑像素，换 DPI 显示器也成立） */
+        int lw = MulDiv(rc.right, 96, g_dpi > 0 ? g_dpi : 96);
+        if (lw != s_cfg.settingsWidth) {
+            s_cfg.settingsWidth = lw;
+            if (lw != g_loadedWidth) g_widthDirty = 1;
+        }
+        return 0;
+    }
+
+    case WM_GETMINMAXINFO: {
+        /* 内容按固定逻辑坐标摆，窗口窄于设计宽度时右列会被裁掉 —— 直接不让缩 */
+        MINMAXINFO* mmi = (MINMAXINFO*)l;
+        RECT rc = { 0, 0, S(WIN_W), S(WIN_H) };
+        ClientToWindowSize(&rc, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), 0,
+                           (UINT)(g_dpi > 0 ? g_dpi : 96));
+        mmi->ptMinTrackSize.x = rc.right - rc.left;
+        mmi->ptMinTrackSize.y = rc.bottom - rc.top;
         return 0;
     }
 
@@ -2675,6 +2748,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
     case WM_DESTROY:
         HintHide();
+        if (g_widthDirty && s_cfg.settingsWidth > 0) SaveSettingsWidth(s_cfg.settingsWidth);
         if (g_font) { DeleteObject(g_font); g_font = NULL; }
         if (g_fontBold) { DeleteObject(g_fontBold); g_fontBold = NULL; }
         if (g_whiteBrush) { DeleteObject(g_whiteBrush); g_whiteBrush = NULL; }
@@ -2782,7 +2856,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
     RegisterClassW(&wc);
 
     /* 窗口尺寸按客户区反推：WIN_W/WIN_H 是内容尺寸，标题栏和边框会额外吃掉
-       三十来个逻辑像素。DPI 只取一次，WM_CREATE 沿用同一值。 */
+       三十来个逻辑像素。DPI 只取一次，WM_CREATE 沿用同一值。
+       宽度恢复上次用过的值（不窄于设计宽度，否则右列会被裁掉）。 */
     g_startupDpi = QueryDpi(NULL);
     if (g_startupDpi == 0) g_startupDpi = 96;
     int dpi = (int)g_startupDpi;
@@ -2790,20 +2865,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
     /* WS_CLIPCHILDREN：父窗口重画（切页签、悬停高亮、缩放）时不要再涂到子窗口
        底下去 —— 否则整窗先擦一遍底再让子控件逐个补画，看着就是整片在闪。 */
     DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX) | WS_CLIPCHILDREN;
-    RECT rc = { 0, 0, MulDiv(WIN_W, dpi, 96), MulDiv(WIN_H, dpi, 96) };
-    {
-        typedef BOOL (WINAPI* PFN_AdjForDpi)(LPRECT, DWORD, BOOL, DWORD, UINT);
-        static PFN_AdjForDpi pfn = NULL;
-        static int tried = 0;
-        if (!tried) {
-            tried = 1;
-            HMODULE u = GetModuleHandleW(L"user32.dll");
-            if (u) pfn = (PFN_AdjForDpi)GetProcAddress(u, "AdjustWindowRectExForDpi");
-        }
-        BOOL ok = FALSE;
-        if (pfn) ok = pfn(&rc, style, FALSE, 0, (UINT)dpi);
-        if (!ok) AdjustWindowRectEx(&rc, style, FALSE, 0);
-    }
+
+    int logicalW = s_cfg.settingsWidth > WIN_W ? s_cfg.settingsWidth : WIN_W;
+    if (logicalW > 1600) logicalW = 1600;      /* 先粗夹一刀，再按工作区夹 */
+    g_loadedWidth = logicalW;
+    RECT rc = { 0, 0, MulDiv(logicalW, dpi, 96), MulDiv(WIN_H, dpi, 96) };
+    ClientToWindowSize(&rc, style, 0, (UINT)dpi);
     int ww = rc.right - rc.left;
     int wh = rc.bottom - rc.top;
 

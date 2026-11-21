@@ -89,6 +89,8 @@ typedef struct {
     int hideComposition;   /* 1=输入法组合窗出现时隐藏                 */
     int wpsCom;            /* 1=WPS 走 Office 对象模型取光标           */
     int autoHideMs;        /* 临时显示时长(ms)；0=不启用               */
+    int settingsWidth;     /* 设置程序上次的窗口客户区宽度（逻辑像素）；0=默认。
+                              纯界面状态，不参与"有未保存改动"的比较 */
 
     StateStyle def;                    /* defaults：未覆盖字段的兜底 */
     StateStyle st[IMEST_COUNT];        /* 每状态覆盖                 */

@@ -146,6 +146,7 @@ void CfgDefaults(ImeCfg* c) {
     c->hideComposition = 1;
     c->wpsCom = 1;
     c->autoHideMs = 1000;
+    c->settingsWidth = 0;      /* 0 = 设置程序用默认宽度 */
 
     /* defaults：未覆盖字段的兜底 */
     c->def.have = SF_SIZE | SF_OFFSETX | SF_OFFSETY | SF_ALPHA | SF_SHAPE;
@@ -695,6 +696,10 @@ static int ReadJsonFile(const WCHAR* path, ImeCfg* c) {
         c->hideComposition = JsonBool(g, L"hideWhenComposition", c->hideComposition);
         c->wpsCom          = JsonBool(g, L"wpsCom", c->wpsCom);
         c->autoHideMs      = JsonInt(g, L"autoHideMs", c->autoHideMs);
+        /* 设置程序上次的窗口宽度（逻辑像素）；0 = 用默认宽度。
+           纯界面状态，不参与脏标记比较。 */
+        c->settingsWidth   = JsonInt(g, L"settingsWidth", c->settingsWidth);
+        if (c->settingsWidth < 0) c->settingsWidth = 0;
     }
 
     const Jv* d = JsonGet(root, L"defaults");
@@ -747,7 +752,13 @@ int CfgSave(const ImeCfg* c) {
     JwKey(&w, L"hideWhenFullscreen"); JwBool(&w, c->hideFullscreen); JwRaw(&w, ",\n    ");
     JwKey(&w, L"hideWhenComposition");JwBool(&w, c->hideComposition);JwRaw(&w, ",\n    ");
     JwKey(&w, L"wpsCom");             JwBool(&w, c->wpsCom);         JwRaw(&w, ",\n    ");
-    JwKey(&w, L"autoHideMs");         JwInt(&w, c->autoHideMs);      JwRaw(&w, "\n  },\n\n  ");
+    JwKey(&w, L"autoHideMs");         JwInt(&w, c->autoHideMs);
+    /* 窗口宽度只在用户拖过窗口后才有值；0 就不写，保持配置文件干净 */
+    if (c->settingsWidth > 0) {
+        JwRaw(&w, ",\n    ");
+        JwKey(&w, L"settingsWidth");  JwInt(&w, c->settingsWidth);
+    }
+    JwRaw(&w, "\n  },\n\n  ");
 
     JwKey(&w, L"defaults"); JwRaw(&w, "{\n    ");
     JwKey(&w, L"size");    JwInt(&w, c->def.size);    JwRaw(&w, ",\n    ");
