@@ -35,6 +35,7 @@
 #define ID_ADD_IGNORE   103
 #define ID_DEL_IGNORE   104
 #define ID_PICK_IMAGE   110   /* 110..112：三个状态块各一个「图片…」按钮 */
+#define ID_RESET        120   /* 120..135：每项数值一个「重置」按钮 */
 
 #define F_ENABLED   1
 #define F_INHERIT   2
@@ -53,6 +54,10 @@
 #define F_COMPOSITION 25
 #define F_WPSCOM    26
 #define F_AUTOHIDE  27
+
+/* 重置按钮按「块 × 字段」编号，这里给出两组的字段顺序 */
+static const int kStateFields[4]  = { F_SIZE, F_OFFX, F_OFFY, F_ALPHA };
+static const int kGlobalFields[4] = { F_POLL, F_TRACK, F_TIMEOUT, F_AUTOHIDE };
 
 #define PAGE_COUNT  7
 #define PAGE_GLOBAL 5
@@ -368,6 +373,8 @@ static int g_syncEdit = 0;
 
 static HWND SliderFor(int block, int field);
 static void ApplySliderValue(int block, int field, int v);
+static int  DefaultFor(int block, int field);
+static void SetSliderValue(int block, int field, int v);
 
 static void SetNumText(HWND e, int v) {
     if (!e) return;
@@ -400,7 +407,6 @@ static LRESULT CALLBACK PanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_COMMAND:
     case WM_HSCROLL:
     case WM_DRAWITEM:
-    case WM_NOTIFY:
         return SendMessageW(g_hwnd, m, w, l);
     case WM_ERASEBKGND: {
         RECT rc;
@@ -741,6 +747,84 @@ static LRESULT CALLBACK SelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
+/* ---------- 滑块自绘 ----------
+   默认 trackbar 是 Win95 的蚀刻槽 + 小方块滑块，和圆角按钮/下划线页签放在
+   一起很割裂。直接接管 WM_PAINT：4px 圆角轨道、已选段蓝色填充、14px 圆形
+   滑块。轨道/滑块位置取控件自己的 TBM_GETCHANNELRECT / TBM_GETTHUMBRECT，
+   画出来的和点得到的是同一套几何。 */
+static void PaintSlider(HWND h, HDC dc) {
+    RECT rc;
+    GetClientRect(h, &rc);
+    HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+
+    RECT ch;
+    RECT th;
+    ZeroMemory(&ch, sizeof(ch));
+    ZeroMemory(&th, sizeof(th));
+    SendMessageW(h, TBM_GETCHANNELRECT, 0, (LPARAM)&ch);
+    SendMessageW(h, TBM_GETTHUMBRECT, 0, (LPARAM)&th);
+    if (ch.right <= ch.left) {
+        ch = rc;
+        int mid = (rc.top + rc.bottom) / 2;
+        ch.top = mid - S(2);
+        ch.bottom = mid + S(2);
+    }
+
+    int cy = (ch.top + ch.bottom) / 2;
+    int th4 = S(4);
+    RECT track = { ch.left, cy - th4 / 2, ch.right, cy + th4 / 2 };
+    int cx = (th.right > th.left) ? (th.left + th.right) / 2 : track.left;
+
+    HBRUSH gb = CreateSolidBrush(RGB(0xE0, 0xE0, 0xE0));
+    HPEN gp = CreatePen(PS_SOLID, 1, RGB(0xE0, 0xE0, 0xE0));
+    HGDIOBJ ob = SelectObject(dc, gb);
+    HGDIOBJ op = SelectObject(dc, gp);
+    RoundRect(dc, track.left, track.top, track.right, track.bottom, th4, th4);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(gb);
+    DeleteObject(gp);
+
+    if (cx > track.left) {
+        HBRUSH bb = CreateSolidBrush(RGB(0x00, 0x78, 0xD7));
+        HPEN bp = CreatePen(PS_SOLID, 1, RGB(0x00, 0x78, 0xD7));
+        ob = SelectObject(dc, bb);
+        op = SelectObject(dc, bp);
+        RoundRect(dc, track.left, track.top, cx, track.bottom, th4, th4);
+        SelectObject(dc, ob);
+        SelectObject(dc, op);
+        DeleteObject(bb);
+        DeleteObject(bp);
+    }
+
+    int d = S(14);
+    HBRUSH b = CreateSolidBrush(RGB(0x00, 0x78, 0xD7));
+    HPEN p = CreatePen(PS_SOLID, 1, RGB(0x00, 0x78, 0xD7));
+    ob = SelectObject(dc, b);
+    op = SelectObject(dc, p);
+    Ellipse(dc, cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(b);
+    DeleteObject(p);
+}
+
+static LRESULT CALLBACK SliderSub(HWND h, UINT m, WPARAM w, LPARAM l,
+                                  UINT_PTR id, DWORD_PTR ref) {
+    (void)ref;
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        PaintSlider(h, dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    if (m == WM_NCDESTROY) RemoveWindowSubclass(h, SliderSub, id);
+    return DefSubclassProc(h, m, w, l);
+}
+
 static HWND CCombo(int x, int y, int w, int h, int block, int field) {
     (void)h;   /* 系统下拉的"展开高度"对自绘控件没有意义 */
     SelData* d = (SelData*)calloc(1, sizeof(SelData));
@@ -776,6 +860,7 @@ static HWND CSlider(int x, int y, int w, int h, int block, int field,
     SendMessageW(c, TBM_SETRANGEMIN, FALSE, (LPARAM)lo);
     SendMessageW(c, TBM_SETRANGEMAX, FALSE, (LPARAM)hi);
     SendMessageW(c, TBM_SETPOS, TRUE, val);
+    SetWindowSubclass(c, SliderSub, 1, 0);
     RegMeta(c, block, field, label, x, y, w, h);
     return c;
 }
@@ -786,6 +871,7 @@ typedef struct {
     HWND imgBtn, imgLabel;
     HWND sep;         /* 块底分隔线：最后一块的分隔线不显示（会变成悬空线） */
     HWND lbl[6];      /* 颜色/形状/尺寸/偏移X/偏移Y/透明度 的静态标签 */
+    HWND reset[4];    /* 尺寸/偏移X/偏移Y/透明度 的重置按钮 */
     HWND slSize, vSize, slOffX, vOffX, slOffY, vOffY, slAlpha, vAlpha;
     HWND transient;
 } Block;
@@ -844,6 +930,13 @@ static void BuildStateBlock(int i, int y) {
         *pvl[k] = CEditNum(cx + 244, cy, 48, 22, i, sl[k].field);
         *psl[k] = CSlider(cx + 56, cy, 184, 22, i, sl[k].field,
                           sl[k].lo, sl[k].hi, sl[k].lo, *pvl[k]);
+        b->reset[k] = CreateWindowExW(0, L"BUTTON", L"重置",
+                                      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                      cx + 296, cy, 44, 22, P,
+                                      (HMENU)(INT_PTR)(ID_RESET + i * 4 + k), NULL, NULL);
+        SendMessageW(b->reset[k], WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+        MakePushButton(b->reset[k]);
+        RegMeta(b->reset[k], i, 0, NULL, cx + 296, cy, 44, 22);
     }
     y += 46;
 
@@ -868,6 +961,8 @@ static void HideBlock(int i) {
         if (all[k]) ShowWindow(all[k], SW_HIDE);
     for (int k = 0; k < 6; k++)
         if (b->lbl[k]) ShowWindow(b->lbl[k], SW_HIDE);
+    for (int k = 0; k < 4; k++)
+        if (b->reset[k]) ShowWindow(b->reset[k], SW_HIDE);
     if (b->sep) ShowWindow(b->sep, SW_HIDE);
     g_blkState[i] = (ImeState)-1;
 }
@@ -882,6 +977,8 @@ static void ShowBlock(int i) {
         if (all[k]) ShowWindow(all[k], SW_SHOW);
     for (int k = 0; k < 6; k++)
         if (b->lbl[k]) ShowWindow(b->lbl[k], SW_SHOW);
+    for (int k = 0; k < 4; k++)
+        if (b->reset[k]) ShowWindow(b->reset[k], SW_SHOW);
     if (b->sep) ShowWindow(b->sep, SW_SHOW);
     /* 跟随开关只对 caps 状态有意义；非 caps 必须显式隐藏，
        否则会留着上一页的状态继续显示 */
@@ -971,10 +1068,10 @@ static void BuildGlobalPanel(void) {
     y += 24;
 
     struct { const WCHAR* nm; int field; int lo, hi; HWND* sl; HWND* vl; } sl[4] = {
-        { L"状态检测间隔", F_POLL,      5, 60000, &g_slPoll,    &g_vPoll },
+        { L"状态检测间隔", F_POLL,      5, 2000,  &g_slPoll,    &g_vPoll },
         { L"光标追踪间隔", F_TRACK,     5, 200,   &g_slTrack,   &g_vTrack },
-        { L"光标查询超时", F_TIMEOUT,  20, 5000,  &g_slTimeout, &g_vTimeout },
-        { L"临时显示时长", F_AUTOHIDE,  0, 60000, &g_slAutoHide,&g_vAutoHide },
+        { L"光标查询超时", F_TIMEOUT,  20, 2000,  &g_slTimeout, &g_vTimeout },
+        { L"临时显示时长", F_AUTOHIDE,  0, 10000, &g_slAutoHide,&g_vAutoHide },
     };
     int vals[4] = { s_cfg.pollMs, s_cfg.trackMs, s_cfg.caretTimeoutMs, s_cfg.autoHideMs };
     for (int i = 0; i < 4; i++) {
@@ -983,6 +1080,13 @@ static void BuildGlobalPanel(void) {
         CLabel(L"ms", x0 + 414, y + 3, 30, 20);
         *sl[i].sl = CSlider(x0 + 120, y, 220, 22, -1, sl[i].field,
                             sl[i].lo, sl[i].hi, vals[i], *sl[i].vl);
+        HWND rb = CreateWindowExW(0, L"BUTTON", L"重置",
+                                  WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                  x0 + 448, y, 44, 22, P,
+                                  (HMENU)(INT_PTR)(ID_RESET + 12 + i), NULL, NULL);
+        SendMessageW(rb, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+        MakePushButton(rb);
+        RegMeta(rb, -1, 0, NULL, x0 + 448, y, 44, 22);
         y += 26;
     }
 
@@ -1433,6 +1537,13 @@ static void PickImage(int block) {
 
 /* ---------- 命令处理 ---------- */
 static void OnCommand(int id, HWND ctl) {
+    if (id >= ID_RESET && id < ID_RESET + 16) {
+        int k = id - ID_RESET;
+        int block = (k < 12) ? k / 4 : -1;
+        int field = (k < 12) ? kStateFields[k % 4] : kGlobalFields[k - 12];
+        SetSliderValue(block, field, DefaultFor(block, field));
+        return;
+    }
     if (id >= ID_PICK_IMAGE && id < ID_PICK_IMAGE + 3) {
         PickImage(id - ID_PICK_IMAGE);
         return;
@@ -1611,6 +1722,39 @@ static void ApplySliderValue(int block, int field, int v) {
         }
     }
     g_dirty = 1;
+
+    /* 拖动时整条重画：只重画滑块矩形的话，旧滑块位置会留下残影 */
+    HWND sl = SliderFor(block, field);
+    if (sl) InvalidateRect(sl, NULL, TRUE);
+}
+
+/* 重置到默认值：状态字段用 defaults 段，全局字段用出厂值 */
+static int DefaultFor(int block, int field) {
+    if (block >= 0) {
+        switch (field) {
+        case F_SIZE:  return s_cfg.def.size;
+        case F_OFFX:  return s_cfg.def.offsetX;
+        case F_OFFY:  return s_cfg.def.offsetY;
+        case F_ALPHA: return s_cfg.def.alpha;
+        }
+    } else {
+        switch (field) {
+        case F_POLL:     return 100;
+        case F_TRACK:    return 15;
+        case F_TIMEOUT:  return 150;
+        case F_AUTOHIDE: return 1000;
+        }
+    }
+    return 0;
+}
+
+static void SetSliderValue(int block, int field, int v) {
+    HWND sl = SliderFor(block, field);
+    if (!sl) return;
+    SendMessageW(sl, TBM_SETPOS, TRUE, v);
+    Meta* m = FindMeta(sl);
+    if (m && m->label) SetNumText(m->label, v);
+    ApplySliderValue(block, field, v);
 }
 
 static void OnHScroll(HWND slider) {
@@ -1647,84 +1791,6 @@ static void OnNumEditDone(HWND e) {
     HWND sl = SliderFor(m->block, m->field);
     if (!sl) return;
     SetNumText(e, (int)SendMessageW(sl, TBM_GETPOS, 0, 0));
-}
-
-/* ---------- 滑块自绘 ----------
-   默认 trackbar 是 Win95 的蚀刻槽 + 小方块滑块，和圆角按钮/下划线页签放在
-   一起很割裂。这里接管 NM_CUSTOMDRAW：4px 圆角轨道、已选段蓝色填充、
-   14px 圆形滑块。命中判定仍走控件默认过程（画的和点的是同一套几何）。 */
-static LRESULT OnSliderCustomDraw(NMCUSTOMDRAW* cd) {
-    if (cd->dwDrawStage == CDDS_PREPAINT) {
-        HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
-        FillRect(cd->hdc, &cd->rc, bg);
-        DeleteObject(bg);
-        return CDRF_NOTIFYITEMDRAW;
-    }
-    if (cd->dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
-
-    HWND h = cd->hdr.hwndFrom;
-    HDC dc = cd->hdc;
-    RECT rc = cd->rc;
-
-    if (cd->dwItemSpec == TBCD_CHANNEL) {
-        int lo = (int)SendMessageW(h, TBM_GETRANGEMIN, 0, 0);
-        int hi = (int)SendMessageW(h, TBM_GETRANGEMAX, 0, 0);
-        int pos = (int)SendMessageW(h, TBM_GETPOS, 0, 0);
-
-        int cy = (rc.top + rc.bottom) / 2;
-        int th = S(4);
-        RECT track = { rc.left, cy - th / 2, rc.right, cy + th / 2 };
-        int thumbW = S(14);
-        int travel = (track.right - track.left) - thumbW;
-        if (travel < 1) travel = 1;
-        double frac = (hi > lo) ? (double)(pos - lo) / (double)(hi - lo) : 0.0;
-        int cx = track.left + thumbW / 2 + (int)(travel * frac);
-
-        HBRUSH gb = CreateSolidBrush(RGB(0xE0, 0xE0, 0xE0));
-        HPEN gp = CreatePen(PS_SOLID, 1, RGB(0xE0, 0xE0, 0xE0));
-        HGDIOBJ ob = SelectObject(dc, gb);
-        HGDIOBJ op = SelectObject(dc, gp);
-        RoundRect(dc, track.left, track.top, track.right, track.bottom, th, th);
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        DeleteObject(gb);
-        DeleteObject(gp);
-
-        if (cx > track.left) {
-            HBRUSH bb = CreateSolidBrush(RGB(0x00, 0x78, 0xD7));
-            HPEN bp = CreatePen(PS_SOLID, 1, RGB(0x00, 0x78, 0xD7));
-            ob = SelectObject(dc, bb);
-            op = SelectObject(dc, bp);
-            RoundRect(dc, track.left, track.top, cx, track.bottom, th, th);
-            SelectObject(dc, ob);
-            SelectObject(dc, op);
-            DeleteObject(bb);
-            DeleteObject(bp);
-        }
-        return CDRF_SKIPDEFAULT;
-    }
-
-    if (cd->dwItemSpec == TBCD_THUMB) {
-        HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
-        FillRect(dc, &rc, bg);
-        DeleteObject(bg);
-
-        int d = S(14);
-        int cx = (rc.left + rc.right) / 2;
-        int cy = (rc.top + rc.bottom) / 2;
-        HBRUSH b = CreateSolidBrush(RGB(0x00, 0x78, 0xD7));
-        HPEN p = CreatePen(PS_SOLID, 1, RGB(0x00, 0x78, 0xD7));
-        HGDIOBJ ob = SelectObject(dc, b);
-        HGDIOBJ op = SelectObject(dc, p);
-        Ellipse(dc, cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2);
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        DeleteObject(b);
-        DeleteObject(p);
-        return CDRF_SKIPDEFAULT;
-    }
-
-    return CDRF_DODEFAULT;
 }
 
 /* ---------- 窗口过程 ---------- */
@@ -1800,13 +1866,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (b2) SetWindowPos(b2, HWND_TOP, bx2, by, S(116), bh, SWP_NOACTIVATE);
         if (b3) SetWindowPos(b3, HWND_TOP, bx3, by, S(84), bh, SWP_NOACTIVATE);
         return 0;
-    }
-
-    case WM_NOTIFY: {
-        NMHDR* nh = (NMHDR*)l;
-        if (nh->code == NM_CUSTOMDRAW)
-            return OnSliderCustomDraw((NMCUSTOMDRAW*)l);
-        break;
     }
 
     case WM_COMMAND: {
