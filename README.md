@@ -20,10 +20,10 @@ https://docs.qq.com/aio/DRWtMY3FQS0ZHRGRG
 
 | 菜单项 | 说明 |
 | --- | --- |
-| 设置… | 启动 `IMEIndicatorSettings.exe`（需与主程序同目录） |
-| 打开配置文件夹 | 在资源管理器里打开 exe 所在目录 |
 | 打开 GitHub 仓库 | 在浏览器打开项目主页 |
 | 记录日志 | 开/关调试日志，写到 `<exe 目录>\log\IMEIndicator-<时间>.log` |
+| 打开配置文件夹 | 在资源管理器里打开 exe 所在目录 |
+| 设置… | 启动 `IMEIndicatorSettings.exe`（需与主程序同目录） |
 | 重启程序 | 重新加载配置 |
 | 退出 | 退出程序 |
 
