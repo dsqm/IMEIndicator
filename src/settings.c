@@ -3,6 +3,7 @@
 #include "image.h"
 #include <stdio.h>
 #include <wchar.h>
+#include <stdlib.h>
 #include <commctrl.h>
 #include <commdlg.h>
 
@@ -127,15 +128,227 @@ static int S(int v) {
     return MulDiv(v, g_dpi, 96);
 }
 
+static HFONT g_fontBold = NULL;
+
+/* 字体：Microsoft YaHei UI 9pt + ClearType。系统消息字体在中文 Windows 上
+   也是雅黑，但英文系统会落到 Segoe UI，中英混排的字重/字宽不一致；这里
+   显式指定，保证各机器上观感一致。粗体用真 Bold 字面（msyhbd.ttc）。 */
+static BYTE FontQuality(void) {
+    BOOL smooth = FALSE;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &smooth, 0);
+    return smooth ? CLEARTYPE_QUALITY : NONANTIALIASED_QUALITY;
+}
+
+static HFONT MakeFont(int bold) {
+    LOGFONTW lf;
+    ZeroMemory(&lf, sizeof(lf));
+    lf.lfHeight = -MulDiv(9, g_dpi > 0 ? g_dpi : 96, 72);
+    lf.lfWeight = bold ? FW_BOLD : FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = FontQuality();
+    lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+    lstrcpynW(lf.lfFaceName, L"Microsoft YaHei UI", LF_FACESIZE);
+    HFONT f = CreateFontIndirectW(&lf);
+    if (!f) f = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    return f;
+}
+
 static HFONT BaseFont(void) {
-    if (!g_font) {
-        NONCLIENTMETRICSW ncm;
-        ZeroMemory(&ncm, sizeof(ncm));
-        ncm.cbSize = sizeof(ncm);
-        SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-        g_font = CreateFontIndirectW(&ncm.lfMessageFont);
-    }
+    if (!g_font) g_font = MakeFont(0);
     return g_font;
+}
+
+static HFONT BoldFont(void) {
+    if (!g_fontBold) g_fontBold = MakeFont(1);
+    return g_fontBold;
+}
+
+/* ---------- 自绘按钮 ----------
+   参考 CapsEnhance 设置程序的观感：圆角、主按钮蓝底白字、次按钮浅底灰边，
+   悬停淡蓝、按下加深。系统默认按钮是 Win95 的浮凸方块，和现在的页签/预览
+   放在一起很割裂。 */
+#define BTN_HOVER_PROP L"IMEIndicatorBtnHover"
+#define CHK_PROP       L"IMEIndicatorCheck"      /* 是自绘复选框 */
+#define CHK_STATE_PROP L"IMEIndicatorCheckState" /* 复选框的勾选状态 */
+
+static LRESULT CALLBACK BtnSub(HWND h, UINT m, WPARAM w, LPARAM l,
+                               UINT_PTR id, DWORD_PTR ref) {
+    (void)ref;
+    /* BS_OWNERDRAW 的按钮不保存勾选状态，BM_SETCHECK/BM_GETCHECK 由这里接管 */
+    if (GetPropW(h, CHK_PROP)) {
+        if (m == BM_SETCHECK) {
+            SetPropW(h, CHK_STATE_PROP, (HANDLE)(INT_PTR)(w == BST_CHECKED ? 1 : 0));
+            InvalidateRect(h, NULL, TRUE);
+            return 0;
+        }
+        if (m == BM_GETCHECK)
+            return GetPropW(h, CHK_STATE_PROP) ? BST_CHECKED : BST_UNCHECKED;
+    }
+    switch (m) {
+    case WM_MOUSEMOVE:
+        if (!GetPropW(h, BTN_HOVER_PROP)) {
+            SetPropW(h, BTN_HOVER_PROP, (HANDLE)1);
+            TRACKMOUSEEVENT t;
+            ZeroMemory(&t, sizeof(t));
+            t.cbSize = sizeof(t);
+            t.dwFlags = TME_LEAVE;
+            t.hwndTrack = h;
+            TrackMouseEvent(&t);
+            InvalidateRect(h, NULL, TRUE);
+        }
+        break;
+    case WM_MOUSELEAVE:
+        RemovePropW(h, BTN_HOVER_PROP);
+        InvalidateRect(h, NULL, TRUE);
+        break;
+    case WM_NCDESTROY:
+        RemovePropW(h, BTN_HOVER_PROP);
+        RemovePropW(h, CHK_STATE_PROP);
+        RemoveWindowSubclass(h, BtnSub, id);
+        break;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+
+static void MakePushButton(HWND h) {
+    SetWindowSubclass(h, BtnSub, 1, 0);
+}
+
+/* 先铺父窗口底色，圆角外的四个角才像"透明"的 */
+static void PaintPushButton(const DRAWITEMSTRUCT* di) {
+    HWND h = di->hwndItem;
+    RECT rc = di->rcItem;
+    BOOL primary = (GetDlgCtrlID(h) == ID_SAVE_RESTART);
+    BOOL hover = GetPropW(h, BTN_HOVER_PROP) != NULL;
+    BOOL pressed = (di->itemState & ODS_SELECTED) != 0;
+    BOOL disabled = (di->itemState & ODS_DISABLED) != 0;
+
+    HBRUSH bg = CreateSolidBrush(GetParent(h) == g_hwnd
+                                     ? RGB(0xF3, 0xF3, 0xF3)
+                                     : RGB(0xFF, 0xFF, 0xFF));
+    FillRect(di->hDC, &rc, bg);
+    DeleteObject(bg);
+
+    COLORREF fill, border, text;
+    if (disabled) {
+        fill = RGB(0xF6, 0xF6, 0xF6);
+        border = RGB(0xBD, 0xBD, 0xBD);
+        text = RGB(0xA0, 0xA0, 0xA0);
+    } else if (primary) {
+        fill = pressed ? RGB(0x00, 0x5A, 0x9E)
+                       : hover ? RGB(0x1A, 0x86, 0xD9) : RGB(0x00, 0x78, 0xD7);
+        border = fill;
+        text = RGB(0xFF, 0xFF, 0xFF);
+    } else {
+        fill = pressed ? RGB(0xCC, 0xE4, 0xF7)
+                       : hover ? RGB(0xE5, 0xF1, 0xFB) : RGB(0xFC, 0xFC, 0xFC);
+        border = pressed ? RGB(0x00, 0x54, 0x99)
+                         : hover ? RGB(0x00, 0x78, 0xD7) : RGB(0xAD, 0xAD, 0xAD);
+        text = RGB(0x00, 0x00, 0x00);
+    }
+
+    int rad = S(4);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HBRUSH br = CreateSolidBrush(fill);
+    HGDIOBJ open = SelectObject(di->hDC, pen);
+    HGDIOBJ obr = SelectObject(di->hDC, br);
+    RoundRect(di->hDC, rc.left, rc.top, rc.right - 1, rc.bottom - 1,
+              rad * 2, rad * 2);
+    SelectObject(di->hDC, open);
+    SelectObject(di->hDC, obr);
+    DeleteObject(pen);
+    DeleteObject(br);
+
+    WCHAR txt[96];
+    GetWindowTextW(h, txt, 96);
+    HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+    if (!f) f = BaseFont();
+    HGDIOBJ of = SelectObject(di->hDC, f);
+    SetBkMode(di->hDC, TRANSPARENT);
+    SetTextColor(di->hDC, text);
+    RECT tr = rc;
+    if (pressed && !primary) OffsetRect(&tr, 0, S(1));
+    DrawTextW(di->hDC, txt, -1, &tr,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(di->hDC, of);
+
+    if (di->itemState & ODS_FOCUS) {
+        RECT frc = rc;
+        InflateRect(&frc, -S(3), -S(3));
+        DrawFocusRect(di->hDC, &frc);
+    }
+}
+
+/* 自绘复选框：16px 圆角方块 + 白色对勾，悬停描边变蓝。
+   BS_OWNERDRAW 不会自动切换勾选状态，点击时由 WM_COMMAND 里手动翻转。 */
+static void PaintCheck(const DRAWITEMSTRUCT* di) {
+    HWND h = di->hwndItem;
+    RECT rc = di->rcItem;
+    BOOL checked = SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    BOOL hover = GetPropW(h, BTN_HOVER_PROP) != NULL;
+    BOOL disabled = (di->itemState & ODS_DISABLED) != 0;
+
+    HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+    FillRect(di->hDC, &rc, bg);
+    DeleteObject(bg);
+
+    int box = S(16);
+    int by = rc.top + (rc.bottom - rc.top - box) / 2;
+    RECT br = { rc.left, by, rc.left + box, by + box };
+
+    COLORREF fill, border;
+    if (disabled) {
+        fill = RGB(0xF6, 0xF6, 0xF6);
+        border = RGB(0xBD, 0xBD, 0xBD);
+    } else if (checked) {
+        fill = RGB(0x00, 0x78, 0xD7);
+        border = fill;
+    } else {
+        fill = RGB(0xFF, 0xFF, 0xFF);
+        border = hover ? RGB(0x00, 0x78, 0xD7) : RGB(0xAD, 0xAD, 0xAD);
+    }
+
+    HBRUSH b = CreateSolidBrush(fill);
+    HPEN p = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ ob = SelectObject(di->hDC, b);
+    HGDIOBJ op = SelectObject(di->hDC, p);
+    RoundRect(di->hDC, br.left, br.top, br.right, br.bottom, S(6), S(6));
+    SelectObject(di->hDC, ob);
+    SelectObject(di->hDC, op);
+    DeleteObject(b);
+    DeleteObject(p);
+
+    if (checked) {
+        HPEN cp = CreatePen(PS_SOLID, S(2), RGB(0xFF, 0xFF, 0xFF));
+        HGDIOBJ oc = SelectObject(di->hDC, cp);
+        POINT pts[3] = {
+            { br.left + S(4),  br.top + S(8) },
+            { br.left + S(7),  br.top + S(11) },
+            { br.left + S(12), br.top + S(5) },
+        };
+        Polyline(di->hDC, pts, 3);
+        SelectObject(di->hDC, oc);
+        DeleteObject(cp);
+    }
+
+    WCHAR txt[128];
+    GetWindowTextW(h, txt, 128);
+    HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+    if (!f) f = BaseFont();
+    HGDIOBJ of = SelectObject(di->hDC, f);
+    SetBkMode(di->hDC, TRANSPARENT);
+    SetTextColor(di->hDC, disabled ? RGB(0xA0, 0xA0, 0xA0) : RGB(0x00, 0x00, 0x00));
+    RECT tr = rc;
+    tr.left += box + S(6);
+    DrawTextW(di->hDC, txt, -1, &tr,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(di->hDC, of);
+
+    if (di->itemState & ODS_FOCUS) {
+        RECT frc = rc;
+        InflateRect(&frc, -S(2), -S(2));
+        DrawFocusRect(di->hDC, &frc);
+    }
 }
 
 /* ---------- 控件元数据（建一次，用于按 hwnd 反查字段 / 统一缩放） ---------- */
@@ -162,6 +375,21 @@ static Meta* FindMeta(HWND h) {
     return NULL;
 }
 
+/* 数值框与滑块双向同步：程序改文本时置位，避免 EN_CHANGE 反过来又写一遍 */
+static int g_syncEdit = 0;
+
+static HWND SliderFor(int block, int field);
+static void ApplySliderValue(int block, int field, int v);
+
+static void SetNumText(HWND e, int v) {
+    if (!e) return;
+    WCHAR vb[32];
+    _snwprintf_s(vb, 32, _TRUNCATE, L"%d", v);
+    g_syncEdit = 1;
+    SetWindowTextW(e, vb);
+    g_syncEdit = 0;
+}
+
 static void ScaleControls(void) {
     for (int i = 0; i < g_metaCount; i++) {
         Meta* m = &g_meta[i];
@@ -184,6 +412,7 @@ static LRESULT CALLBACK PanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_COMMAND:
     case WM_HSCROLL:
     case WM_DRAWITEM:
+    case WM_NOTIFY:
         return SendMessageW(g_hwnd, m, w, l);
     case WM_ERASEBKGND: {
         RECT rc;
@@ -238,18 +467,22 @@ static HWND CLabel(const WCHAR* t, int x, int y, int w, int h) {
 
 static HWND CCheck(const WCHAR* t, int x, int y, int w, int h,
                    int block, int field, int checked) {
-    HWND c = CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+    HWND c = CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                              x, y, w, h, P, NULL, NULL, NULL);
     SendMessageW(c, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+    /* 先把属性与子类装上，BM_SETCHECK 才拦得到（拦截逻辑见 BtnSub） */
+    SetPropW(c, CHK_PROP, (HANDLE)1);
+    MakePushButton(c);          /* 复用悬停跟踪 */
     SendMessageW(c, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
     RegMeta(c, block, field, NULL, x, y, w, h);
     return c;
 }
 
 static HWND CButton(const WCHAR* t, int x, int y, int w, int h, int id) {
-    HWND c = CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    HWND c = CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                              x, y, w, h, P, (HMENU)(INT_PTR)id, NULL, NULL);
     SendMessageW(c, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+    MakePushButton(c);
     RegMeta(c, -2, 0, NULL, x, y, w, h);
     return c;
 }
@@ -263,12 +496,277 @@ static HWND CEdit(int x, int y, int w, int h) {
     return c;
 }
 
-static HWND CCombo(int x, int y, int w, int h, int block, int field) {
-    HWND c = CreateWindowExW(0, L"COMBOBOX", NULL,
-                             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+/* 数值框：直接输入，和滑块双向同步（滑块手抖时靠它精确调）。
+   不用 ES_NUMBER：偏移量允许负数，而 ES_NUMBER 连负号一起挡掉；
+   非法字符由失焦时的回填纠正。 */
+static HWND CEditNum(int x, int y, int w, int h, int block, int field) {
+    HWND c = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0",
+                             WS_CHILD | WS_VISIBLE | ES_RIGHT | ES_AUTOHSCROLL,
                              x, y, w, h, P, NULL, NULL, NULL);
     SendMessageW(c, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
     RegMeta(c, block, field, NULL, x, y, w, h);
+    return c;
+}
+
+/* ---------- 自绘下拉（替代系统 COMBOBOX） ----------
+   系统下拉的 3D 边框与方形箭头改不掉，和圆角按钮/下划线页签放一起很割裂。
+   这里自绘：闭合态是圆角框 + 当前项 + 右侧箭头，点开弹出一份圆角列表
+   （悬停高亮、当前项蓝色文字）。
+   对外仍认 CB_ADDSTRING / CB_SETCURSEL / CB_GETCURSEL，调用处不用改。 */
+#define SEL_MAX_ITEMS 8
+#define SEL_MAX_TEXT  32
+#define SEL_ITEM_H    26
+#define SEL_CLASS     L"IMEIndicatorSelect"
+#define SEL_POPUP     L"IMEIndicatorSelectPopup"
+
+typedef struct {
+    int   block, field;
+    int   count, sel, hot;
+    WCHAR items[SEL_MAX_ITEMS][SEL_MAX_TEXT];
+} SelData;
+
+static HWND g_selPopup = NULL;
+static HWND g_selOwner = NULL;
+
+static SelData* SelOf(HWND h) {
+    return (SelData*)GetWindowLongPtrW(h, GWLP_USERDATA);
+}
+
+static void CloseSelPopup(void) {
+    HWND p = g_selPopup;
+    g_selPopup = NULL;
+    g_selOwner = NULL;
+    if (!p) return;
+    if (GetCapture() == p) ReleaseCapture();
+    DestroyWindow(p);
+}
+
+static void SelPaint(HWND h, HDC dc) {
+    SelData* d = SelOf(h);
+    RECT rc;
+    GetClientRect(h, &rc);
+    HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+
+    BOOL enabled = IsWindowEnabled(h);
+    BOOL hover = enabled && GetPropW(h, BTN_HOVER_PROP) != NULL;
+    COLORREF border = !enabled ? RGB(0xD0, 0xD0, 0xD0)
+                    : hover ? RGB(0x00, 0x78, 0xD7) : RGB(0xAD, 0xAD, 0xAD);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ op = SelectObject(dc, pen);
+    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    RoundRect(dc, rc.left, rc.top, rc.right - 1, rc.bottom - 1, S(6), S(6));
+    SelectObject(dc, op);
+    SelectObject(dc, ob);
+    DeleteObject(pen);
+
+    int ax = rc.right - S(16), ay = (rc.top + rc.bottom) / 2;
+    HPEN ap = CreatePen(PS_SOLID, S(2),
+                        enabled ? RGB(0x54, 0x54, 0x54) : RGB(0xB0, 0xB0, 0xB0));
+    HGDIOBJ oa = SelectObject(dc, ap);
+    MoveToEx(dc, ax - S(4), ay - S(2), NULL);
+    LineTo(dc, ax, ay + S(2));
+    LineTo(dc, ax + S(4), ay - S(2));
+    SelectObject(dc, oa);
+    DeleteObject(ap);
+
+    if (d && d->count > 0) {
+        HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+        if (!f) f = BaseFont();
+        HGDIOBJ of = SelectObject(dc, f);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, enabled ? RGB(0x00, 0x00, 0x00) : RGB(0xA0, 0xA0, 0xA0));
+        RECT tr = rc;
+        tr.left += S(10);
+        tr.right -= S(26);
+        DrawTextW(dc, d->items[d->sel], -1, &tr,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(dc, of);
+    }
+}
+
+static LRESULT CALLBACK SelPopupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    SelData* d = SelOf(h);
+    switch (m) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
+
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xAD, 0xAD, 0xAD));
+        HGDIOBJ op = SelectObject(dc, pen);
+        HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        RoundRect(dc, 0, 0, rc.right - 1, rc.bottom - 1, S(8), S(8));
+        SelectObject(dc, op);
+        SelectObject(dc, ob);
+        DeleteObject(pen);
+
+        HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+        if (!f) f = BaseFont();
+        HGDIOBJ of = SelectObject(dc, f);
+        SetBkMode(dc, TRANSPARENT);
+        int ih = S(SEL_ITEM_H);
+        for (int i = 0; d && i < d->count; i++) {
+            RECT r = { S(4), S(4) + i * ih, rc.right - S(4), S(4) + (i + 1) * ih };
+            if (i == d->hot) {
+                HBRUSH hb = CreateSolidBrush(RGB(0xE5, 0xF1, 0xFB));
+                FillRect(dc, &r, hb);
+                DeleteObject(hb);
+            }
+            SetTextColor(dc, i == d->sel ? RGB(0x00, 0x5A, 0x9E) : RGB(0x00, 0x00, 0x00));
+            RECT tr = r;
+            tr.left += S(8);
+            DrawTextW(dc, d->items[i], -1, &tr,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+        SelectObject(dc, of);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if (!d) return 0;
+        int ih = S(SEL_ITEM_H);
+        int y = (short)HIWORD(l) - S(4);
+        int i = (y < 0) ? -1 : y / ih;
+        if (i >= d->count) i = -1;
+        if (i != d->hot) {
+            d->hot = i;
+            InvalidateRect(h, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        if (!d) return 0;
+        int ih = S(SEL_ITEM_H);
+        int y = (short)HIWORD(l) - S(4);
+        int i = (y < 0) ? -1 : y / ih;
+        if (i >= 0 && i < d->count) {
+            d->sel = i;
+            HWND owner = g_selOwner;
+            CloseSelPopup();
+            if (owner) {
+                InvalidateRect(owner, NULL, TRUE);
+                SendMessageW(GetParent(owner), WM_COMMAND,
+                             MAKEWPARAM(GetDlgCtrlID(owner), CBN_SELCHANGE), (LPARAM)owner);
+            }
+        } else {
+            CloseSelPopup();
+        }
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        if (g_selPopup && (HWND)l != h) CloseSelPopup();
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static void OpenSelPopup(HWND owner) {
+    SelData* d = SelOf(owner);
+    if (!d || d->count <= 0 || !IsWindowEnabled(owner)) return;
+    if (g_selPopup) CloseSelPopup();
+
+    RECT wr;
+    GetWindowRect(owner, &wr);
+    int ih = S(SEL_ITEM_H);
+    int w = wr.right - wr.left;
+    int h = d->count * ih + S(8);
+
+    g_selPopup = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, SEL_POPUP, NULL,
+                                 WS_POPUP, wr.left, wr.bottom, w, h,
+                                 owner, NULL, GetModuleHandleW(NULL), NULL);
+    if (!g_selPopup) return;
+    g_selOwner = owner;
+    d->hot = -1;
+    SetWindowLongPtrW(g_selPopup, GWLP_USERDATA, (LONG_PTR)d);
+    SendMessageW(g_selPopup, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+
+    HRGN rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, S(8), S(8));
+    SetWindowRgn(g_selPopup, rgn, TRUE);
+
+    ShowWindow(g_selPopup, SW_SHOWNOACTIVATE);
+    SetCapture(g_selPopup);
+    InvalidateRect(g_selPopup, NULL, TRUE);
+}
+
+static LRESULT CALLBACK SelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    SelData* d = SelOf(h);
+    switch (m) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        SelPaint(h, dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case CB_ADDSTRING:
+        if (d && d->count < SEL_MAX_ITEMS) {
+            lstrcpynW(d->items[d->count], (const WCHAR*)l, SEL_MAX_TEXT);
+            int idx = d->count++;
+            InvalidateRect(h, NULL, TRUE);
+            return idx;
+        }
+        return CB_ERR;
+    case CB_SETCURSEL:
+        if (d && (int)w >= 0 && (int)w < d->count) {
+            d->sel = (int)w;
+            InvalidateRect(h, NULL, TRUE);
+            return d->sel;
+        }
+        return CB_ERR;
+    case CB_GETCURSEL:
+        return (d && d->count > 0) ? d->sel : CB_ERR;
+    case WM_LBUTTONDOWN:
+        OpenSelPopup(h);
+        return 0;
+    case WM_MOUSEMOVE:
+        if (!GetPropW(h, BTN_HOVER_PROP)) {
+            SetPropW(h, BTN_HOVER_PROP, (HANDLE)1);
+            TRACKMOUSEEVENT t;
+            ZeroMemory(&t, sizeof(t));
+            t.cbSize = sizeof(t);
+            t.dwFlags = TME_LEAVE;
+            t.hwndTrack = h;
+            TrackMouseEvent(&t);
+            InvalidateRect(h, NULL, TRUE);
+        }
+        return 0;
+    case WM_MOUSELEAVE:
+        RemovePropW(h, BTN_HOVER_PROP);
+        InvalidateRect(h, NULL, TRUE);
+        return 0;
+    case WM_NCDESTROY:
+        if (g_selPopup && g_selOwner == h) CloseSelPopup();
+        if (d) {
+            free(d);
+            SetWindowLongPtrW(h, GWLP_USERDATA, 0);
+        }
+        break;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static HWND CCombo(int x, int y, int w, int h, int block, int field) {
+    (void)h;   /* 系统下拉的"展开高度"对自绘控件没有意义 */
+    SelData* d = (SelData*)calloc(1, sizeof(SelData));
+    HWND c = CreateWindowExW(0, SEL_CLASS, NULL, WS_CHILD | WS_VISIBLE,
+                             x, y, w, 22, P, NULL, NULL, NULL);
+    if (d) {
+        d->block = block;
+        d->field = field;
+        d->sel = 0;
+        d->hot = -1;
+        SetWindowLongPtrW(c, GWLP_USERDATA, (LONG_PTR)d);
+    }
+    SendMessageW(c, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+    RegMeta(c, block, field, NULL, x, y, w, 22);
     return c;
 }
 
@@ -316,6 +814,7 @@ static void BuildStateBlock(int i, int y) {
     const int rx = x0 + 380;
 
     b->title = CLabel(L"", lx, y + 2, 150, 20);
+    SendMessageW(b->title, WM_SETFONT, (WPARAM)BoldFont(), TRUE);
     b->enable = CCheck(L"启用", lx + 156, y, 60, 22, i, F_ENABLED, 1);
     b->inherit = CCheck(L"跟随基础状态", lx + 220, y, 120, 22, i, F_INHERIT, 0);
     y += 24;
@@ -331,10 +830,11 @@ static void BuildStateBlock(int i, int y) {
     /* 「图片…」按钮：选文件 -> 复制进 shapes\ -> 形状自动切到图片。
        注册成 block=i 的控件，跟随基础状态时会被整块置灰。 */
     b->imgBtn = CreateWindowExW(0, L"BUTTON", L"图片…",
-                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                 rx + 174, y, 76, 22, P,
                                 (HMENU)(INT_PTR)(ID_PICK_IMAGE + i), NULL, NULL);
     SendMessageW(b->imgBtn, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+    MakePushButton(b->imgBtn);
     RegMeta(b->imgBtn, i, 0, NULL, rx + 174, y, 76, 22);
     b->imgLabel = CLabel(L"", rx + 256, y + 4, 150, 20);
     g_imgLabel[i] = b->imgLabel;
@@ -352,7 +852,7 @@ static void BuildStateBlock(int i, int y) {
         int cx = (k % 2 == 0) ? lx : rx;
         int cy = y + (k / 2) * 23;
         b->lbl[2 + k] = CLabel(sl[k].nm, cx, cy + 3, 54, 20);
-        *pvl[k] = CLabel(L"0", cx + 244, cy + 3, 48, 20);
+        *pvl[k] = CEditNum(cx + 244, cy, 48, 22, i, sl[k].field);
         *psl[k] = CSlider(cx + 56, cy, 184, 22, i, sl[k].field,
                           sl[k].lo, sl[k].hi, sl[k].lo, *pvl[k]);
     }
@@ -424,10 +924,10 @@ static void FillBlock(int i, ImeState s) {
     SendMessageW(b->slOffY, TBM_SETPOS, TRUE, eff.offsetY);
     SendMessageW(b->slAlpha, TBM_SETPOS, TRUE, eff.alpha);
     WCHAR vb[64];
-    _snwprintf_s(vb, 64, _TRUNCATE, L"%d", eff.size);    SetWindowTextW(b->vSize, vb);
-    _snwprintf_s(vb, 64, _TRUNCATE, L"%d", eff.offsetX); SetWindowTextW(b->vOffX, vb);
-    _snwprintf_s(vb, 64, _TRUNCATE, L"%d", eff.offsetY); SetWindowTextW(b->vOffY, vb);
-    _snwprintf_s(vb, 64, _TRUNCATE, L"%d", eff.alpha);   SetWindowTextW(b->vAlpha, vb);
+    SetNumText(b->vSize, eff.size);
+    SetNumText(b->vOffX, eff.offsetX);
+    SetNumText(b->vOffY, eff.offsetY);
+    SetNumText(b->vAlpha, eff.alpha);
 
     if (s_cfg.autoHideMs > 0)
         _snwprintf_s(vb, 64, _TRUNCATE, L"状态变化后只显示 %d ms", s_cfg.autoHideMs);
@@ -438,9 +938,10 @@ static void FillBlock(int i, ImeState s) {
 
     ShowBlock(i);
 
-    /* 图片行：只在形状=图片时露文件名；文件缺失/解码失败标红，提示会回退圆点 */
+    /* 图片行：只在形状=图片时露文件名与选择按钮；文件缺失/解码失败标红 */
     g_imgBad[i] = 0;
     if (eff.shape == SHAPE_IMAGE) {
+        ShowWindow(b->imgBtn, SW_SHOW);
         ShowWindow(b->imgLabel, SW_SHOW);
         ImgView iv;
         WCHAR err[128];
@@ -451,6 +952,7 @@ static void FillBlock(int i, ImeState s) {
             g_imgBad[i] = 1;
         }
     } else {
+        ShowWindow(b->imgBtn, SW_HIDE);
         ShowWindow(b->imgLabel, SW_HIDE);
     }
     InvalidateRect(b->imgLabel, NULL, TRUE);
@@ -472,7 +974,8 @@ static HWND g_slPoll, g_vPoll, g_slTrack, g_vTrack, g_slTimeout, g_vTimeout,
 static void BuildGlobalPanel(void) {
     P = g_globalPanel;
     int y = 0, x0 = 14;
-    CLabel(L"检测", x0, y, 200, 22);
+    HWND hDetect = CLabel(L"检测", x0, y, 200, 22);
+    SendMessageW(hDetect, WM_SETFONT, (WPARAM)BoldFont(), TRUE);
     y += 24;
 
     struct { const WCHAR* nm; int field; int lo, hi; HWND* sl; HWND* vl; } sl[4] = {
@@ -484,9 +987,8 @@ static void BuildGlobalPanel(void) {
     int vals[4] = { s_cfg.pollMs, s_cfg.trackMs, s_cfg.caretTimeoutMs, s_cfg.autoHideMs };
     for (int i = 0; i < 4; i++) {
         CLabel(sl[i].nm, x0 + 6, y + 3, 110, 20);
-        WCHAR vb[32];
-        _snwprintf_s(vb, 32, _TRUNCATE, L"%d ms", vals[i]);
-        *sl[i].vl = CLabel(vb, x0 + 350, y + 3, 80, 20);
+        *sl[i].vl = CEditNum(x0 + 346, y, 64, 22, -1, sl[i].field);
+        CLabel(L"ms", x0 + 414, y + 3, 30, 20);
         *sl[i].sl = CSlider(x0 + 120, y, 220, 22, -1, sl[i].field,
                             sl[i].lo, sl[i].hi, vals[i], *sl[i].vl);
         y += 26;
@@ -501,7 +1003,8 @@ static void BuildGlobalPanel(void) {
     SendMessageW(g_cbStrategy, CB_SETCURSEL, s_cfg.imeStrategy, 0);
     y += 34;
 
-    CLabel(L"隐藏", x0, y, 200, 22);
+    HWND hHide = CLabel(L"隐藏", x0, y, 200, 22);
+    SendMessageW(hHide, WM_SETFONT, (WPARAM)BoldFont(), TRUE);
     y += 24;
     g_ckFull = CCheck(L"前景窗口全屏时隐藏", x0 + 6, y, 300, 22, -1, F_FULLSCREEN, s_cfg.hideFullscreen);
     y += 24;
@@ -519,11 +1022,10 @@ static void FillGlobalPanel(void) {
     SendMessageW(g_slTrack, TBM_SETPOS, TRUE, s_cfg.trackMs);
     SendMessageW(g_slTimeout, TBM_SETPOS, TRUE, s_cfg.caretTimeoutMs);
     SendMessageW(g_slAutoHide, TBM_SETPOS, TRUE, s_cfg.autoHideMs);
-    WCHAR vb[32];
-    _snwprintf_s(vb, 32, _TRUNCATE, L"%d ms", s_cfg.pollMs);     SetWindowTextW(g_vPoll, vb);
-    _snwprintf_s(vb, 32, _TRUNCATE, L"%d ms", s_cfg.trackMs);    SetWindowTextW(g_vTrack, vb);
-    _snwprintf_s(vb, 32, _TRUNCATE, L"%d ms", s_cfg.caretTimeoutMs); SetWindowTextW(g_vTimeout, vb);
-    _snwprintf_s(vb, 32, _TRUNCATE, L"%d ms", s_cfg.autoHideMs); SetWindowTextW(g_vAutoHide, vb);
+    SetNumText(g_vPoll, s_cfg.pollMs);
+    SetNumText(g_vTrack, s_cfg.trackMs);
+    SetNumText(g_vTimeout, s_cfg.caretTimeoutMs);
+    SetNumText(g_vAutoHide, s_cfg.autoHideMs);
     SendMessageW(g_cbStrategy, CB_SETCURSEL, s_cfg.imeStrategy, 0);
     SendMessageW(g_ckFull, BM_SETCHECK, s_cfg.hideFullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_ckComp, BM_SETCHECK, s_cfg.hideComposition ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -781,31 +1283,49 @@ static int TabWidth(HDC dc, int i) {
     return sz.cx + S(26);
 }
 
+static int g_hotTab = -1;   /* 鼠标悬停的页签；-1 = 没有 */
+
 static void PaintTabs(HDC dc) {
+    RECT crc;
+    GetClientRect(g_hwnd, &crc);
     int x = S(TAB_X);
+    int top = S(TAB_Y), bot = S(TAB_Y + TAB_H);
     HFONT old = (HFONT)SelectObject(dc, BaseFont());
     SetBkMode(dc, TRANSPARENT);
+
+    /* 分隔线：所有页签都"站"在它上面（现代设置页的下划线页签） */
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xD6, 0xD6, 0xD6));
+    HGDIOBJ op = SelectObject(dc, pen);
+    MoveToEx(dc, 0, bot - 1, NULL);
+    LineTo(dc, crc.right, bot - 1);
+    SelectObject(dc, op);
+    DeleteObject(pen);
+
     for (int i = 0; i < PAGE_COUNT; i++) {
         int w = TabWidth(dc, i);
-        RECT r = { x, S(TAB_Y), x + w, S(TAB_Y + TAB_H) };
+        RECT r = { x, top, x + w, bot };
         if (i == g_page) {
-            SetTextColor(dc, RGB(0x00, 0x67, 0xC0));
-            LOGFONTW lf;
-            GetObjectW(BaseFont(), sizeof(lf), &lf);
-            lf.lfWeight = FW_BOLD;
-            HFONT bold = CreateFontIndirectW(&lf);
-            HFONT prev = (HFONT)SelectObject(dc, bold);
-            DrawTextW(dc, kPages[i].name, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(dc, prev);
-            DeleteObject(bold);
-            RECT ul = { x + S(8), S(TAB_Y + TAB_H - 3), x + w - S(8), S(TAB_Y + TAB_H - 1) };
-            HBRUSH b = CreateSolidBrush(RGB(0x00, 0x67, 0xC0));
+            /* 选中页：强调条从页签脚下长出来，贴住分隔线 */
+            RECT ul = { x + S(8), bot - S(3), x + w - S(8), bot - 1 };
+            HBRUSH b = CreateSolidBrush(RGB(0x00, 0x78, 0xD7));
             FillRect(dc, &ul, b);
             DeleteObject(b);
-        } else {
-            SetTextColor(dc, RGB(0x4A, 0x4A, 0x4A));
-            DrawTextW(dc, kPages[i].name, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else if (i == g_hotTab) {
+            HBRUSH hb = CreateSolidBrush(RGB(0xE5, 0xF1, 0xFB));
+            HGDIOBJ ob = SelectObject(dc, hb);
+            HGDIOBJ opn = SelectObject(dc, GetStockObject(NULL_PEN));
+            RoundRect(dc, r.left + 1, r.top + 1, r.right - 1, r.bottom - 1,
+                      S(8), S(8));
+            SelectObject(dc, opn);
+            SelectObject(dc, ob);
+            DeleteObject(hb);
         }
+        /* 选中页不加粗：粗体只留给段头，切换时文字宽度不跳 */
+        SetTextColor(dc, i == g_page ? RGB(0x00, 0x5A, 0x9E)
+                        : i == g_hotTab ? RGB(0x00, 0x00, 0x00)
+                                        : RGB(0x54, 0x54, 0x54));
+        DrawTextW(dc, kPages[i].name, -1, &r,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         x += w;
     }
     SelectObject(dc, old);
@@ -994,34 +1514,42 @@ static void OnCommand(int id, HWND ctl) {
     }
 }
 
-static void OnHScroll(HWND slider) {
-    Meta* m = FindMeta(slider);
-    if (!m) return;
-    int v = SliderPos(slider);
-
-    if (m->label) {
-        WCHAR vb[32];
-        int isMs = (m->field == F_POLL || m->field == F_TRACK ||
-                    m->field == F_TIMEOUT || m->field == F_AUTOHIDE);
-        _snwprintf_s(vb, 32, _TRUNCATE, isMs ? L"%d ms" : L"%d", v);
-        SetWindowTextW(m->label, vb);
-    }
-
-    if (m->block >= 0) {
-        ImeState s = g_blkState[m->block];
-        if ((int)s >= 0) {
-            StateStyle* raw = &s_cfg.st[s];
-            switch (m->field) {
-            case F_SIZE:  raw->size = v;    raw->have |= SF_SIZE;    break;
-            case F_OFFX:  raw->offsetX = v; raw->have |= SF_OFFSETX; break;
-            case F_OFFY:  raw->offsetY = v; raw->have |= SF_OFFSETY; break;
-            case F_ALPHA: raw->alpha = v;   raw->have |= SF_ALPHA;   break;
-            default: break;
-            }
-            InvalidatePreview();
+/* 滑块与数值框共用的"落到配置"逻辑 */
+static HWND SliderFor(int block, int field) {
+    if (block >= 0 && block < 3) {
+        Block* b = &g_blk[block];
+        switch (field) {
+        case F_SIZE:  return b->slSize;
+        case F_OFFX:  return b->slOffX;
+        case F_OFFY:  return b->slOffY;
+        case F_ALPHA: return b->slAlpha;
         }
-    } else if (m->block == -1) {
-        switch (m->field) {
+    } else if (block == -1) {
+        switch (field) {
+        case F_POLL:     return g_slPoll;
+        case F_TRACK:    return g_slTrack;
+        case F_TIMEOUT:  return g_slTimeout;
+        case F_AUTOHIDE: return g_slAutoHide;
+        }
+    }
+    return NULL;
+}
+
+static void ApplySliderValue(int block, int field, int v) {
+    if (block >= 0) {
+        ImeState s = g_blkState[block];
+        if ((int)s < 0) return;
+        StateStyle* raw = &s_cfg.st[s];
+        switch (field) {
+        case F_SIZE:  raw->size = v;    raw->have |= SF_SIZE;    break;
+        case F_OFFX:  raw->offsetX = v; raw->have |= SF_OFFSETX; break;
+        case F_OFFY:  raw->offsetY = v; raw->have |= SF_OFFSETY; break;
+        case F_ALPHA: raw->alpha = v;   raw->have |= SF_ALPHA;   break;
+        default: return;
+        }
+        InvalidatePreview();
+    } else if (block == -1) {
+        switch (field) {
         case F_POLL:     s_cfg.pollMs = v; break;
         case F_TRACK:    s_cfg.trackMs = v; break;
         case F_TIMEOUT:  s_cfg.caretTimeoutMs = v; break;
@@ -1029,10 +1557,124 @@ static void OnHScroll(HWND slider) {
             s_cfg.autoHideMs = v;
             if (g_page < 5) { for (int i = 0; i < 3; i++) FillBlock(i, g_blkState[i]); }
             break;
-        default: break;
+        default: return;
         }
     }
     g_dirty = 1;
+}
+
+static void OnHScroll(HWND slider) {
+    Meta* m = FindMeta(slider);
+    if (!m) return;
+    int v = SliderPos(slider);
+    SetNumText(m->label, v);
+    ApplySliderValue(m->block, m->field, v);
+}
+
+/* 数值框输入：夹到滑块值域后同步回去 */
+static void OnNumEditChanged(HWND e) {
+    if (g_syncEdit) return;
+    Meta* m = FindMeta(e);
+    if (!m) return;
+    HWND sl = SliderFor(m->block, m->field);
+    if (!sl) return;
+    WCHAR buf[32];
+    GetWindowTextW(e, buf, 32);
+    if (!buf[0]) return;                  /* 清空/输入中：先不动 */
+    int v = _wtoi(buf);
+    int lo = (int)SendMessageW(sl, TBM_GETRANGEMIN, 0, 0);
+    int hi = (int)SendMessageW(sl, TBM_GETRANGEMAX, 0, 0);
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    SendMessageW(sl, TBM_SETPOS, TRUE, v);
+    ApplySliderValue(m->block, m->field, v);
+}
+
+/* 失焦：用滑块当前值把文本纠正回来（越界/空值不留在框里） */
+static void OnNumEditDone(HWND e) {
+    Meta* m = FindMeta(e);
+    if (!m) return;
+    HWND sl = SliderFor(m->block, m->field);
+    if (!sl) return;
+    SetNumText(e, (int)SendMessageW(sl, TBM_GETPOS, 0, 0));
+}
+
+/* ---------- 滑块自绘 ----------
+   默认 trackbar 是 Win95 的蚀刻槽 + 小方块滑块，和圆角按钮/下划线页签放在
+   一起很割裂。这里接管 NM_CUSTOMDRAW：4px 圆角轨道、已选段蓝色填充、
+   14px 圆形滑块。命中判定仍走控件默认过程（画的和点的是同一套几何）。 */
+static LRESULT OnSliderCustomDraw(NMCUSTOMDRAW* cd) {
+    if (cd->dwDrawStage == CDDS_PREPAINT) {
+        HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+        FillRect(cd->hdc, &cd->rc, bg);
+        DeleteObject(bg);
+        return CDRF_NOTIFYITEMDRAW;
+    }
+    if (cd->dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
+
+    HWND h = cd->hdr.hwndFrom;
+    HDC dc = cd->hdc;
+    RECT rc = cd->rc;
+
+    if (cd->dwItemSpec == TBCD_CHANNEL) {
+        int lo = (int)SendMessageW(h, TBM_GETRANGEMIN, 0, 0);
+        int hi = (int)SendMessageW(h, TBM_GETRANGEMAX, 0, 0);
+        int pos = (int)SendMessageW(h, TBM_GETPOS, 0, 0);
+
+        int cy = (rc.top + rc.bottom) / 2;
+        int th = S(4);
+        RECT track = { rc.left, cy - th / 2, rc.right, cy + th / 2 };
+        int thumbW = S(14);
+        int travel = (track.right - track.left) - thumbW;
+        if (travel < 1) travel = 1;
+        double frac = (hi > lo) ? (double)(pos - lo) / (double)(hi - lo) : 0.0;
+        int cx = track.left + thumbW / 2 + (int)(travel * frac);
+
+        HBRUSH gb = CreateSolidBrush(RGB(0xE0, 0xE0, 0xE0));
+        HPEN gp = CreatePen(PS_SOLID, 1, RGB(0xE0, 0xE0, 0xE0));
+        HGDIOBJ ob = SelectObject(dc, gb);
+        HGDIOBJ op = SelectObject(dc, gp);
+        RoundRect(dc, track.left, track.top, track.right, track.bottom, th, th);
+        SelectObject(dc, ob);
+        SelectObject(dc, op);
+        DeleteObject(gb);
+        DeleteObject(gp);
+
+        if (cx > track.left) {
+            HBRUSH bb = CreateSolidBrush(RGB(0x00, 0x78, 0xD7));
+            HPEN bp = CreatePen(PS_SOLID, 1, RGB(0x00, 0x78, 0xD7));
+            ob = SelectObject(dc, bb);
+            op = SelectObject(dc, bp);
+            RoundRect(dc, track.left, track.top, cx, track.bottom, th, th);
+            SelectObject(dc, ob);
+            SelectObject(dc, op);
+            DeleteObject(bb);
+            DeleteObject(bp);
+        }
+        return CDRF_SKIPDEFAULT;
+    }
+
+    if (cd->dwItemSpec == TBCD_THUMB) {
+        HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
+
+        int d = S(14);
+        int cx = (rc.left + rc.right) / 2;
+        int cy = (rc.top + rc.bottom) / 2;
+        HBRUSH b = CreateSolidBrush(RGB(0x00, 0x78, 0xD7));
+        HPEN p = CreatePen(PS_SOLID, 1, RGB(0x00, 0x78, 0xD7));
+        HGDIOBJ ob = SelectObject(dc, b);
+        HGDIOBJ op = SelectObject(dc, p);
+        Ellipse(dc, cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2);
+        SelectObject(dc, ob);
+        SelectObject(dc, op);
+        DeleteObject(b);
+        DeleteObject(p);
+        return CDRF_SKIPDEFAULT;
+    }
+
+    return CDRF_DODEFAULT;
 }
 
 /* ---------- 窗口过程 ---------- */
@@ -1052,15 +1694,18 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         {
             P = h;
             HWND b;
-            b = CreateWindowExW(0, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            b = CreateWindowExW(0, L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                 0, 0, 10, 10, h, (HMENU)(INT_PTR)ID_SAVE, NULL, NULL);
             SendMessageW(b, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
-            b = CreateWindowExW(0, L"BUTTON", L"保存并重启", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            MakePushButton(b);
+            b = CreateWindowExW(0, L"BUTTON", L"保存并重启", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                 0, 0, 10, 10, h, (HMENU)(INT_PTR)ID_SAVE_RESTART, NULL, NULL);
             SendMessageW(b, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
-            b = CreateWindowExW(0, L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            MakePushButton(b);
+            b = CreateWindowExW(0, L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                 0, 0, 10, 10, h, (HMENU)(INT_PTR)ID_CLOSE, NULL, NULL);
             SendMessageW(b, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+            MakePushButton(b);
         }
 
         /* 三个页面板：全部建好，切页只改显隐 */
@@ -1091,22 +1736,64 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         MoveWindow(g_globalPanel, S(14), S(CONTENT_Y), pw, ph, TRUE);
         MoveWindow(g_ignorePanel, S(14), S(CONTENT_Y), pw, ph, TRUE);
 
-        int by = rc.bottom - S(BOTTOM_H);
+        int bh = S(28);
+        int by = rc.bottom - S(BOTTOM_H) + (S(BOTTOM_H) - bh) / 2;
         HWND b1 = GetDlgItem(h, ID_SAVE);
         HWND b2 = GetDlgItem(h, ID_SAVE_RESTART);
         HWND b3 = GetDlgItem(h, ID_CLOSE);
-        if (b1) SetWindowPos(b1, HWND_TOP, S(14), by, S(80), S(26), SWP_NOACTIVATE);
-        if (b2) SetWindowPos(b2, HWND_TOP, S(14 + 88), by, S(110), S(26), SWP_NOACTIVATE);
-        if (b3) SetWindowPos(b3, HWND_TOP, rc.right - S(14 + 80), by, S(80), S(26), SWP_NOACTIVATE);
+        if (b1) SetWindowPos(b1, HWND_TOP, S(14), by, S(84), bh, SWP_NOACTIVATE);
+        if (b2) SetWindowPos(b2, HWND_TOP, S(14 + 92), by, S(116), bh, SWP_NOACTIVATE);
+        if (b3) SetWindowPos(b3, HWND_TOP, rc.right - S(14 + 84), by, S(84), bh, SWP_NOACTIVATE);
         return 0;
     }
 
-    case WM_COMMAND:
-        OnCommand(LOWORD(w), (HWND)l);
+    case WM_NOTIFY: {
+        NMHDR* nh = (NMHDR*)l;
+        if (nh->code == NM_CUSTOMDRAW)
+            return OnSliderCustomDraw((NMCUSTOMDRAW*)l);
+        break;
+    }
+
+    case WM_COMMAND: {
+        int code = HIWORD(w);
+        HWND ctl = (HWND)l;
+        if (code == EN_CHANGE)    { OnNumEditChanged(ctl); return 0; }
+        if (code == EN_KILLFOCUS) { OnNumEditDone(ctl); return 0; }
+        if (code == BN_CLICKED && GetPropW(ctl, CHK_PROP)) {
+            /* 自绘复选框不会自己翻转状态，这里补上 */
+            int st = (int)SendMessageW(ctl, BM_GETCHECK, 0, 0);
+            SendMessageW(ctl, BM_SETCHECK,
+                         st == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
+            InvalidateRect(ctl, NULL, TRUE);
+        }
+        OnCommand(LOWORD(w), ctl);
         return 0;
+    }
 
     case WM_HSCROLL:
         OnHScroll((HWND)l);
+        return 0;
+
+    case WM_MOUSEMOVE: {
+        int t = HitTab((short)LOWORD(l), (short)HIWORD(l));
+        if (t != g_hotTab) {
+            g_hotTab = t;
+            InvalidateRect(h, NULL, FALSE);
+        }
+        TRACKMOUSEEVENT tme;
+        ZeroMemory(&tme, sizeof(tme));
+        tme.cbSize = sizeof(tme);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = h;
+        TrackMouseEvent(&tme);
+        return 0;
+    }
+
+    case WM_MOUSELEAVE:
+        if (g_hotTab >= 0) {
+            g_hotTab = -1;
+            InvalidateRect(h, NULL, FALSE);
+        }
         return 0;
 
     case WM_LBUTTONDOWN: {
@@ -1119,24 +1806,44 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)l;
-        if (di->CtlType == ODT_BUTTON) {
-            Meta* mm = FindMeta(di->hwndItem);
-            DWORD rgb = 0xFF0000;
-            if (mm && mm->block >= 0) {
-                ImeState s = g_blkState[mm->block];
-                if ((int)s >= 0) {
-                    StateStyle eff;
-                    CfgStateStyle(&s_cfg, s, &eff);
-                    rgb = eff.rgb;
-                }
-            }
-            HBRUSH b = CreateSolidBrush(RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF));
-            FillRect(di->hDC, &di->rcItem, b);
-            DeleteObject(b);
-            FrameRect(di->hDC, &di->rcItem, (HBRUSH)GetStockObject(GRAY_BRUSH));
+        if (di->CtlType != ODT_BUTTON) return FALSE;
+
+        if (GetPropW(di->hwndItem, CHK_PROP)) {
+            PaintCheck(di);
             return TRUE;
         }
-        return FALSE;
+
+        Meta* mm = FindMeta(di->hwndItem);
+        if (!mm || mm->field != F_COLOR) {
+            PaintPushButton(di);
+            return TRUE;
+        }
+
+        /* 颜色按钮：圆角色块 + 细边框 */
+        DWORD rgb = 0xFF0000;
+        if (mm->block >= 0) {
+            ImeState s = g_blkState[mm->block];
+            if ((int)s >= 0) {
+                StateStyle eff;
+                CfgStateStyle(&s_cfg, s, &eff);
+                rgb = eff.rgb;
+            }
+        }
+        HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+        FillRect(di->hDC, &di->rcItem, bg);
+        DeleteObject(bg);
+
+        HBRUSH b = CreateSolidBrush(RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF));
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xAD, 0xAD, 0xAD));
+        HGDIOBJ ob = SelectObject(di->hDC, b);
+        HGDIOBJ op = SelectObject(di->hDC, pen);
+        RoundRect(di->hDC, di->rcItem.left, di->rcItem.top,
+                  di->rcItem.right - 1, di->rcItem.bottom - 1, S(6), S(6));
+        SelectObject(di->hDC, ob);
+        SelectObject(di->hDC, op);
+        DeleteObject(b);
+        DeleteObject(pen);
+        return TRUE;
     }
 
     case WM_ERASEBKGND: {
@@ -1177,6 +1884,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
     case WM_DESTROY:
         if (g_font) { DeleteObject(g_font); g_font = NULL; }
+        if (g_fontBold) { DeleteObject(g_fontBold); g_fontBold = NULL; }
         if (g_whiteBrush) { DeleteObject(g_whiteBrush); g_whiteBrush = NULL; }
         PostQuitMessage(0);
         return 0;
@@ -1232,6 +1940,24 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
     CfgLoad(&s_cfg);
 
     RegisterPanelClass(hInst);
+
+    {   /* 自绘下拉与它的弹出列表 */
+        WNDCLASSW sc;
+        ZeroMemory(&sc, sizeof(sc));
+        sc.lpfnWndProc = SelProc;
+        sc.hInstance = hInst;
+        sc.lpszClassName = SEL_CLASS;
+        sc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        RegisterClassW(&sc);
+
+        WNDCLASSW sp;
+        ZeroMemory(&sp, sizeof(sp));
+        sp.lpfnWndProc = SelPopupProc;
+        sp.hInstance = hInst;
+        sp.lpszClassName = SEL_POPUP;
+        sp.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        RegisterClassW(&sp);
+    }
 
     static const WCHAR pcls[] = L"IMEIndicatorPreview";
     WNDCLASSW pc;
