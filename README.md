@@ -121,13 +121,19 @@ JSON、把旧文件改名 `.ini.bak`。旧版 `Caps` 是独立状态，迁移时
 微信输入框无文字时不显示提示。  
 会造成部分游戏卡顿。可尝试将游戏进程添加至黑名单。
 
+**托盘图标注册失败**：如果程序放在带「低完整性标签」的目录里（某些沙箱工作区会给目录打
+`Mandatory Label\Low Mandatory Level`，目录下所有文件继承），非管理员启动时进程会跑在
+Low 完整性，无法向任务栏发消息，`Shell_NotifyIcon` 返回拒绝访问 —— 表现为托盘没有图标。
+两种解法：以管理员运行（进程提到 High，压过文件标签），或把程序**复制**（不是移动，
+同卷移动会保留标签）到普通目录。
+
 ## 构建
 
 需要 Visual Studio（MSVC x64）：
 
 ```
 build.bat      # 产出 bin\IMEIndicator.exe 和 bin\IMEIndicatorSettings.exe
-test.bat       # 跑配置层单元测试（JSON 往返、继承、迁移、黑名单）
+test.bat       # 跑配置层与形状光栅化的单元测试
 ```
 
 许可证 GPL-3.0-or-later，见 `LICENSE`。
