@@ -97,6 +97,20 @@ int CfgShapeFromName(const WCHAR* name, int def) {
     return def;
 }
 
+int CfgImageNameValid(const WCHAR* name) {
+    if (!name || !name[0]) return 0;
+    if (wcslen(name) >= CFG_NAME_MAX) return 0;
+    if (wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0) return 0;
+    for (const WCHAR* p = name; *p; p++) {
+        switch (*p) {
+        case L'\\': case L'/': case L':': case L'*': case L'?':
+        case L'"':  case L'<': case L'>': case L'|':
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* ---------- 路径 ---------- */
 
 void CfgDir(WCHAR* out, size_t cap) {
@@ -221,6 +235,7 @@ void CfgStateStyle(const ImeCfg* c, ImeState s, StateStyle* out) {
     if (acc.offsetX < -2048 || acc.offsetX > 2048) acc.offsetX = c->def.offsetX;
     if (acc.offsetY < -2048 || acc.offsetY > 2048) acc.offsetY = c->def.offsetY;
     if (acc.shape < SHAPE_NONE || acc.shape > SHAPE_IMAGE) acc.shape = SHAPE_CIRCLE;
+    if (!CfgImageNameValid(acc.image)) acc.image[0] = 0;
     acc.inherit = -1;
     *out = acc;
 }
@@ -284,7 +299,7 @@ static void ReadState(const Jv* o, StateStyle* s) {
     }
     if ((v = JsonGet(o, L"image")) != NULL) {
         const WCHAR* nm = JsonStr(o, L"image");
-        if (nm) {
+        if (CfgImageNameValid(nm)) {
             lstrcpynW(s->image, nm, CFG_NAME_MAX);
             s->have |= SF_IMAGE;
         }

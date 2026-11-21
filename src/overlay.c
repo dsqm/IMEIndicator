@@ -1,5 +1,6 @@
 #include "ime_indicator.h"
 #include "shape.h"
+#include "image.h"
 
 /* ================= 悬浮提示窗口 =================
    WS_EX_LAYERED + WS_EX_TRANSPARENT + WS_EX_TOPMOST + WS_EX_NOACTIVATE：
@@ -22,7 +23,8 @@ static HWND    g_hwnd = NULL;
 static StateStyle g_style;
 static int     g_haveStyle = 0;
 
-static int     g_pxSize = 20;
+static int     g_pxW = 20, g_pxH = 20;
+static int     g_pxTarget = 20;   /* 图片形状的「长边」目标像素（g_pxW 是短边时不能拿它当目标） */
 static int     g_pxOffX = -2;
 static int     g_pxOffY = 4;
 static int     g_shape = SHAPE_CIRCLE;
@@ -34,7 +36,7 @@ static HDC     g_mem = NULL;
 static HBITMAP g_bmp = NULL;
 static HGDIOBJ g_oldBmp = NULL;
 static void*   g_bits = NULL;
-static int     g_bmpSize = 0;
+static int     g_bmpW = 0, g_bmpH = 0;
 static int     g_bmpDirty = 1;   /* 配色/尺寸/形状变了 -> 重算像素 */
 static int     g_needPaint = 1;  /* 必须再 UpdateLayeredWindow 一次（如重新显示） */
 static int     g_lastX = 0, g_lastY = 0;
@@ -59,7 +61,7 @@ void OverlayInit(void) {
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
         WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         cls, L"IMEIndicator", WS_POPUP,
-        -100, -100, g_pxSize, g_pxSize, NULL, NULL, hi, NULL);
+        -100, -100, g_pxW, g_pxH, NULL, NULL, hi, NULL);
     if (g_hwnd) {
         /* 初始为全透明占位，避免闪出白块 */
         BLENDFUNCTION bf = { AC_SRC_OVER, 0, 0, AC_SRC_ALPHA };
@@ -74,7 +76,7 @@ static void FreeSurface(void) {
     if (g_mem) { DeleteDC(g_mem); g_mem = NULL; }
     if (g_bmp) { DeleteObject(g_bmp); g_bmp = NULL; }
     g_bits = NULL;
-    g_bmpSize = 0;
+    g_bmpW = g_bmpH = 0;
     g_bmpDirty = 1;
 }
 
@@ -126,20 +128,21 @@ void OverlayApply(const StateStyle* st) {
     g_bmpDirty = 1;
 }
 
-/* 按当前尺寸准备好 DIB Section（尺寸变了才重建） */
-static int EnsureSurface(void) {
-    if (g_mem && g_bmp && g_bits && g_bmpSize == g_pxSize) return 1;
+/* 按当前尺寸准备好 DIB Section（尺寸变了才重建）。
+   图片形状不是正方形，所以宽高分开记。 */
+static int EnsureSurface(int w, int h) {
+    if (g_mem && g_bmp && g_bits && g_bmpW == w && g_bmpH == h) return 1;
     FreeSurface();
-    int sz = g_pxSize;
-    if (sz < 1) sz = 1;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
     HDC scr = GetDC(NULL);
     if (!scr) return 0;
     g_mem = CreateCompatibleDC(scr);
     BITMAPINFO bmi;
     ZeroMemory(&bmi, sizeof(bmi));
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-    bmi.bmiHeader.biWidth = sz;
-    bmi.bmiHeader.biHeight = -sz;            /* 自上而下 */
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;             /* 自上而下 */
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -148,15 +151,27 @@ static int EnsureSurface(void) {
     ReleaseDC(NULL, scr);
     if (!g_mem || !g_bmp || !g_bits) { FreeSurface(); return 0; }
     g_oldBmp = SelectObject(g_mem, g_bmp);
-    g_bmpSize = sz;
+    g_bmpW = w;
+    g_bmpH = h;
     g_bmpDirty = 1;
     return 1;
 }
 
-/* 画当前形状进缓存的 DIB。形状本身由 shape.c 提供（与设置程序预览共用
-   同一份光栅化，保证"预览看到的 = 实际看到的"）。 */
+/* 画当前形状进缓存的 DIB。内置形状由 shape.c 提供，图片由 image.c 提供
+   （与设置程序预览共用同一份实现，保证"预览看到的 = 实际看到的"）。 */
 static void PaintDot(void) {
-    ShapeRasterize((BYTE*)g_bits, g_bmpSize, g_style.rgb, g_alpha, g_shape);
+    if (g_shape == SHAPE_IMAGE) {
+        ImgView v;
+        if (ImgGet(g_style.image, g_pxTarget, &v, NULL, 0) &&
+            v.w == g_bmpW && v.h == g_bmpH) {
+            ImgBlit((BYTE*)g_bits, &v, g_alpha);
+            g_bmpDirty = 0;
+            return;
+        }
+        /* 图片在 OverlayMove 里已经确认可用；走到这里说明缓存被挤掉了，
+           退回圆点，别让指示器整个消失。 */
+    }
+    ShapeRasterize((BYTE*)g_bits, g_bmpW, g_style.rgb, g_alpha, g_shape);
     g_bmpDirty = 0;
 }
 
@@ -174,21 +189,30 @@ void OverlayMove(int screenX, int baselineY) {
     int pxOffY = ScaleByDpi(g_style.offsetY, dpi);
 
     int shape = g_style.shape;
-    /* 一期：图片形状还没实现，回退成圆（用该状态的颜色），
-       保证指示器不会因为配置里写了 image 就整个消失。 */
-    if (shape == SHAPE_IMAGE) shape = SHAPE_CIRCLE;
+    int pxW = pxSize, pxH = pxSize;
+    if (shape == SHAPE_IMAGE) {
+        ImgView v;
+        if (ImgGet(g_style.image, pxSize, &v, NULL, 0)) {
+            pxW = v.w;
+            pxH = v.h;
+        } else {
+            shape = SHAPE_CIRCLE;   /* 图片缺失/解码失败：回退圆点 */
+        }
+    }
 
     BYTE nr = (BYTE)(g_style.rgb >> 16);
     BYTE ng = (BYTE)(g_style.rgb >> 8);
     BYTE nb = (BYTE)(g_style.rgb);
     BYTE na = (BYTE)(g_style.alpha & 0xFF);
 
-    if (pxSize != g_pxSize || shape != g_shape ||
+    if (pxW != g_pxW || pxH != g_pxH || pxSize != g_pxTarget || shape != g_shape ||
         nr != g_cr || ng != g_cg || nb != g_cb || na != g_alpha ||
         dpi != g_lastDpi) {
         g_bmpDirty = 1;
     }
-    g_pxSize = pxSize;
+    g_pxW = pxW;
+    g_pxH = pxH;
+    g_pxTarget = pxSize;
     g_pxOffX = pxOffX;
     g_pxOffY = pxOffY;
     g_shape = shape;
@@ -198,14 +222,14 @@ void OverlayMove(int screenX, int baselineY) {
     /* 位置、样式都没变 -> 不重绘（追踪循环每 15ms 调一次，绝大多数是空转） */
     if (!g_bmpDirty && !g_needPaint && g_havePos &&
         screenX == g_lastX && baselineY == g_lastY) return;
-    if (!EnsureSurface()) return;
+    if (!EnsureSurface(pxW, pxH)) return;
     if (g_bmpDirty) PaintDot();
 
     HDC scr = GetDC(NULL);
     if (!scr) return;
     POINT dst = { screenX + g_pxOffX, baselineY + g_pxOffY };
     POINT src = { 0, 0 };
-    SIZE  szw = { g_bmpSize, g_bmpSize };
+    SIZE  szw = { g_bmpW, g_bmpH };
     BLENDFUNCTION bf;
     bf.BlendOp = AC_SRC_OVER;
     bf.BlendFlags = 0;

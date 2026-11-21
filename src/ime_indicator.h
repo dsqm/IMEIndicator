@@ -42,11 +42,11 @@ typedef enum {
 } ImeState;
 
 /* 形状。SHAPE_NONE = 该状态不显示（等价于旧版色值写 0）。
-   SHAPE_IMAGE 二期实现，一期解析但渲染回退成圆。 */
+   SHAPE_IMAGE 用 shapes\ 下的图片，见 image.h。 */
 #define SHAPE_NONE     0
 #define SHAPE_CIRCLE   1   /* 实心圆（默认） */
 #define SHAPE_TRIANGLE 2   /* 等边三角形，尖角朝上 */
-#define SHAPE_IMAGE    3   /* 自定义图片（二期） */
+#define SHAPE_IMAGE    3   /* 自定义图片（shapes\ 目录） */
 
 /* 每个状态可单独覆盖的字段。用位掩码记录"这一项用户显式设过"，
    没设过的才走继承/defaults —— 否则无法区分"用户就是要 20"和"默认是 20"。 */
@@ -114,6 +114,9 @@ const WCHAR* CfgStateName(ImeState s);  /* "cn_cn" 这类 JSON 键名 */
 int    CfgStateFromName(const WCHAR* name); /* 反查；认不出返回 -1 */
 const WCHAR* CfgShapeName(int shape);   /* "circle" / "triangle" / "none" / "image" */
 int    CfgShapeFromName(const WCHAR* name, int def);
+/* 图片文件名是否合法：只接受 shapes\ 下的裸文件名 —— 带路径分隔符、盘符、
+   通配符或 ".." 的一律拒绝，避免配置把程序引到目录外去。 */
+int    CfgImageNameValid(const WCHAR* name);
 /* 进程名（可带 .exe）是否命中黑名单。纯字符串比较，不碰窗口 API ——
    设置程序也要用它，所以不能依赖 ime.c。 */
 int    CfgIsIgnored(const ImeCfg* c, const WCHAR* procName);

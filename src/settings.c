@@ -1,8 +1,10 @@
 #include "ime_indicator.h"
 #include "shape.h"
+#include "image.h"
 #include <stdio.h>
 #include <wchar.h>
 #include <commctrl.h>
+#include <commdlg.h>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "msimg32.lib")   /* AlphaBlend：预览贴抗锯齿图形用 */
@@ -31,6 +33,7 @@
 #define ID_CLOSE        102
 #define ID_ADD_IGNORE   103
 #define ID_DEL_IGNORE   104
+#define ID_PICK_IMAGE   110   /* 110..112：三个状态块各一个「图片…」按钮 */
 
 #define F_ENABLED   1
 #define F_INHERIT   2
@@ -169,6 +172,11 @@ static void ScaleControls(void) {
 }
 
 /* ---------- 面板 ---------- */
+/* 图片文件名标签：文件缺失/解码失败时标红（WM_CTLCOLORSTATIC 里用）。
+   放在这里是因为面板过程要读，而 Block 结构在后面才定义。 */
+static HWND g_imgLabel[3];
+static int  g_imgBad[3];
+
 static LRESULT CALLBACK PanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     /* 控件的命令/滚动/自绘通知发到**父窗口**（现在父窗口是面板），
@@ -187,6 +195,14 @@ static LRESULT CALLBACK PanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_CTLCOLORBTN: {
         HDC dc = (HDC)w;
         SetBkColor(dc, RGB(0xFF, 0xFF, 0xFF));
+        SetTextColor(dc, RGB(0x00, 0x00, 0x00));
+        HWND ctl = (HWND)l;
+        for (int i = 0; i < 3; i++) {
+            if (ctl == g_imgLabel[i] && g_imgBad[i]) {
+                SetTextColor(dc, RGB(0xC0, 0x00, 0x00));
+                break;
+            }
+        }
         return (LRESULT)g_whiteBrush;
     }
     }
@@ -281,6 +297,8 @@ static HWND CSlider(int x, int y, int w, int h, int block, int field,
 /* ---------- 布局面板：3 个固定块 ---------- */
 typedef struct {
     HWND title, enable, inherit, color, shape;
+    HWND imgBtn, imgLabel;
+    HWND lbl[6];      /* 颜色/形状/尺寸/偏移X/偏移Y/透明度 的静态标签 */
     HWND slSize, vSize, slOffX, vOffX, slOffY, vOffY, slAlpha, vAlpha;
     HWND transient;
 } Block;
@@ -302,13 +320,24 @@ static void BuildStateBlock(int i, int y) {
     b->inherit = CCheck(L"跟随基础状态", lx + 220, y, 120, 22, i, F_INHERIT, 0);
     y += 24;
 
-    CLabel(L"颜色", lx, y + 4, 54, 20);
+    b->lbl[0] = CLabel(L"颜色", lx, y + 4, 54, 20);
     b->color = CColorBtn(lx + 58, y, 60, 22, i);
-    CLabel(L"形状", rx, y + 4, 54, 20);
-    b->shape = CCombo(rx + 58, y, 130, 180, i, F_SHAPE);
+    b->lbl[1] = CLabel(L"形状", rx, y + 4, 54, 20);
+    b->shape = CCombo(rx + 58, y, 110, 180, i, F_SHAPE);
     SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"不显示");
     SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"圆");
     SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"三角形");
+    SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"图片");
+    /* 「图片…」按钮：选文件 -> 复制进 shapes\ -> 形状自动切到图片。
+       注册成 block=i 的控件，跟随基础状态时会被整块置灰。 */
+    b->imgBtn = CreateWindowExW(0, L"BUTTON", L"图片…",
+                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                rx + 174, y, 76, 22, P,
+                                (HMENU)(INT_PTR)(ID_PICK_IMAGE + i), NULL, NULL);
+    SendMessageW(b->imgBtn, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+    RegMeta(b->imgBtn, i, 0, NULL, rx + 174, y, 76, 22);
+    b->imgLabel = CLabel(L"", rx + 256, y + 4, 150, 20);
+    g_imgLabel[i] = b->imgLabel;
     y += 26;
 
     struct { const WCHAR* nm; int field; int lo, hi; } sl[4] = {
@@ -322,7 +351,7 @@ static void BuildStateBlock(int i, int y) {
     for (int k = 0; k < 4; k++) {
         int cx = (k % 2 == 0) ? lx : rx;
         int cy = y + (k / 2) * 23;
-        CLabel(sl[k].nm, cx, cy + 3, 54, 20);
+        b->lbl[2 + k] = CLabel(sl[k].nm, cx, cy + 3, 54, 20);
         *pvl[k] = CLabel(L"0", cx + 244, cy + 3, 48, 20);
         *psl[k] = CSlider(cx + 56, cy, 184, 22, i, sl[k].field,
                           sl[k].lo, sl[k].hi, sl[k].lo, *pvl[k]);
@@ -342,20 +371,26 @@ static void BuildStateBlock(int i, int y) {
 static void HideBlock(int i) {
     Block* b = &g_blk[i];
     HWND all[] = { b->title, b->enable, b->inherit, b->color, b->shape,
+                   b->imgBtn, b->imgLabel,
                    b->slSize, b->vSize, b->slOffX, b->vOffX,
                    b->slOffY, b->vOffY, b->slAlpha, b->vAlpha, b->transient };
     for (size_t k = 0; k < sizeof(all)/sizeof(all[0]); k++)
         if (all[k]) ShowWindow(all[k], SW_HIDE);
+    for (int k = 0; k < 6; k++)
+        if (b->lbl[k]) ShowWindow(b->lbl[k], SW_HIDE);
     g_blkState[i] = (ImeState)-1;
 }
 
 static void ShowBlock(int i) {
     Block* b = &g_blk[i];
     HWND all[] = { b->title, b->enable, b->color, b->shape,
+                   b->imgBtn, b->imgLabel,
                    b->slSize, b->vSize, b->slOffX, b->vOffX,
                    b->slOffY, b->vOffY, b->slAlpha, b->vAlpha, b->transient };
     for (size_t k = 0; k < sizeof(all)/sizeof(all[0]); k++)
         if (all[k]) ShowWindow(all[k], SW_SHOW);
+    for (int k = 0; k < 6; k++)
+        if (b->lbl[k]) ShowWindow(b->lbl[k], SW_SHOW);
     /* 跟随开关只对 caps 状态有意义；非 caps 必须显式隐藏，
        否则会留着上一页的状态继续显示 */
     ShowWindow(b->inherit, IsCapsState(g_blkState[i]) ? SW_SHOW : SW_HIDE);
@@ -380,7 +415,9 @@ static void FillBlock(int i, ImeState s) {
     SendMessageW(b->enable, BM_SETCHECK, raw->enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(b->inherit, BM_SETCHECK, inherited ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(b->shape, CB_SETCURSEL,
-                 (eff.shape == SHAPE_NONE) ? 0 : (eff.shape == SHAPE_TRIANGLE) ? 2 : 1, 0);
+                 (eff.shape == SHAPE_NONE) ? 0 :
+                 (eff.shape == SHAPE_TRIANGLE) ? 2 :
+                 (eff.shape == SHAPE_IMAGE) ? 3 : 1, 0);
 
     SendMessageW(b->slSize, TBM_SETPOS, TRUE, eff.size);
     SendMessageW(b->slOffX, TBM_SETPOS, TRUE, eff.offsetX);
@@ -400,6 +437,23 @@ static void FillBlock(int i, ImeState s) {
     SendMessageW(b->transient, BM_SETCHECK, eff.transient ? BST_CHECKED : BST_UNCHECKED, 0);
 
     ShowBlock(i);
+
+    /* 图片行：只在形状=图片时露文件名；文件缺失/解码失败标红，提示会回退圆点 */
+    g_imgBad[i] = 0;
+    if (eff.shape == SHAPE_IMAGE) {
+        ShowWindow(b->imgLabel, SW_SHOW);
+        ImgView iv;
+        WCHAR err[128];
+        if (eff.image[0] && ImgGet(eff.image, 64, &iv, err, 128)) {
+            SetWindowTextW(b->imgLabel, eff.image);
+        } else {
+            SetWindowTextW(b->imgLabel, eff.image[0] ? L"图片不可用" : L"未选择图片");
+            g_imgBad[i] = 1;
+        }
+    } else {
+        ShowWindow(b->imgLabel, SW_HIDE);
+    }
+    InvalidateRect(b->imgLabel, NULL, TRUE);
 
     /* 跟随中：除「启用 / 跟随」外整块置灰 */
     for (int k = 0; k < g_metaCount; k++) {
@@ -545,15 +599,22 @@ static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             int y = baseY + S(st.offsetY);
 
             int shape = st.shape;
-            if (shape == SHAPE_IMAGE) shape = SHAPE_CIRCLE;   /* 二期才实现 */
+            ImgView iv = { 0, 0, NULL };
+            int haveImg = 0;
+            if (shape == SHAPE_IMAGE) {
+                if (ImgGet(st.image, sz, &iv, NULL, 0)) haveImg = 1;
+                else shape = SHAPE_CIRCLE;   /* 图片缺失/解码失败：回退圆点 */
+            }
+            int dw = haveImg ? iv.w : sz;
+            int dh = haveImg ? iv.h : sz;
 
             /* 走和悬浮窗**同一份**光栅化再 AlphaBlend 贴上去：
                用 GDI 的 Ellipse/Polygon 是无抗锯齿的，预览就会比实际毛糙。 */
             BITMAPINFO bmi;
             ZeroMemory(&bmi, sizeof(bmi));
             bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-            bmi.bmiHeader.biWidth = sz;
-            bmi.bmiHeader.biHeight = -sz;
+            bmi.bmiHeader.biWidth = dw;
+            bmi.bmiHeader.biHeight = -dh;
             bmi.bmiHeader.biPlanes = 1;
             bmi.bmiHeader.biBitCount = 32;
             bmi.bmiHeader.biCompression = BI_RGB;
@@ -563,13 +624,14 @@ static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             HBITMAP bmp = mem ? CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
             if (mem && bmp && bits) {
                 HGDIOBJ oldBmp = SelectObject(mem, bmp);
-                ShapeRasterize((BYTE*)bits, sz, st.rgb, st.alpha, shape);
+                if (haveImg) ImgBlit((BYTE*)bits, &iv, st.alpha);
+                else ShapeRasterize((BYTE*)bits, sz, st.rgb, st.alpha, shape);
                 BLENDFUNCTION bf;
                 bf.BlendOp = AC_SRC_OVER;
                 bf.BlendFlags = 0;
                 bf.SourceConstantAlpha = 255;
                 bf.AlphaFormat = AC_SRC_ALPHA;
-                AlphaBlend(dc, x, y, sz, sz, mem, 0, 0, sz, sz, bf);
+                AlphaBlend(dc, x, y, dw, dh, mem, 0, 0, dw, dh, bf);
                 SelectObject(mem, oldBmp);
             }
             if (bmp) DeleteObject(bmp);
@@ -604,7 +666,9 @@ static void CommitForm(void) {
                 raw->inherit = Checked(b->inherit) ? CapsBase(s) : -1;
             }
             int sel = (int)SendMessageW(b->shape, CB_GETCURSEL, 0, 0);
-            raw->shape = (sel == 0) ? SHAPE_NONE : (sel == 2) ? SHAPE_TRIANGLE : SHAPE_CIRCLE;
+            raw->shape = (sel == 0) ? SHAPE_NONE :
+                         (sel == 2) ? SHAPE_TRIANGLE :
+                         (sel == 3) ? SHAPE_IMAGE : SHAPE_CIRCLE;
             raw->have |= SF_SHAPE;
             raw->size = SliderPos(b->slSize);     raw->have |= SF_SIZE;
             raw->offsetX = SliderPos(b->slOffX);  raw->have |= SF_OFFSETX;
@@ -761,8 +825,48 @@ static int HitTab(int mx, int my) {
     return hit;
 }
 
+/* ---------- 选图片 ---------- */
+/* 选一个文件 -> 复制进 shapes\（重名自动加序号）-> 该状态切到图片形状。
+   复制而不是引用原路径：配置里只存文件名，换机器/挪目录都不会断。 */
+static void PickImage(int block) {
+    ImeState s = g_blkState[block];
+    if ((int)s < 0) return;
+
+    WCHAR file[MAX_PATH];
+    file[0] = 0;
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hwnd;
+    ofn.lpstrFilter = L"图片 (*.png;*.ico;*.bmp;*.jpg)\0*.png;*.ico;*.bmp;*.jpg\0所有文件\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return;
+
+    WCHAR name[CFG_NAME_MAX];
+    if (!ImgImport(file, name, CFG_NAME_MAX)) {
+        MessageBoxW(g_hwnd, L"无法把图片复制到 shapes 目录。\n\n"
+                            L"请确认程序所在目录可写。",
+                    L"导入图片失败", MB_ICONERROR | MB_OK);
+        return;
+    }
+
+    StateStyle* raw = &s_cfg.st[s];
+    lstrcpynW(raw->image, name, CFG_NAME_MAX);
+    raw->shape = SHAPE_IMAGE;
+    raw->have |= SF_IMAGE | SF_SHAPE;
+    g_dirty = 1;
+    FillBlock(block, s);
+    InvalidatePreview();
+}
+
 /* ---------- 命令处理 ---------- */
 static void OnCommand(int id, HWND ctl) {
+    if (id >= ID_PICK_IMAGE && id < ID_PICK_IMAGE + 3) {
+        PickImage(id - ID_PICK_IMAGE);
+        return;
+    }
     if (id == ID_SAVE)         { DoSave(0); return; }
     if (id == ID_SAVE_RESTART) { DoSave(1); return; }
     if (id == ID_CLOSE)        { PostMessageW(g_hwnd, WM_CLOSE, 0, 0); return; }
@@ -852,9 +956,13 @@ static void OnCommand(int id, HWND ctl) {
         ImeState s = g_blkState[m->block];
         if ((int)s < 0) return;
         int sel = (int)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
-        s_cfg.st[s].shape = (sel == 0) ? SHAPE_NONE : (sel == 2) ? SHAPE_TRIANGLE : SHAPE_CIRCLE;
+        s_cfg.st[s].shape = (sel == 0) ? SHAPE_NONE :
+                            (sel == 2) ? SHAPE_TRIANGLE :
+                            (sel == 3) ? SHAPE_IMAGE : SHAPE_CIRCLE;
         s_cfg.st[s].have |= SF_SHAPE;
         g_dirty = 1;
+        /* 切到/切离「图片」要同步文件名标签的显隐与标红 */
+        FillBlock(m->block, s);
         InvalidatePreview();
         return;
     }
@@ -1113,6 +1221,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
 
     SetDpiAware();
 
+    /* WIC 解码图片需要 COM（预览与「图片…」导入都会用到） */
+    HRESULT co = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
     icc.dwICC = ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
@@ -1186,5 +1297,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    ImgShutdown();
+    if (SUCCEEDED(co)) CoUninitialize();
     return 0;
 }

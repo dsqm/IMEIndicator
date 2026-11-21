@@ -54,5 +54,25 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem ---- image shapes: WIC decode, aspect scaling, import dedup ----
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
+   /Fobin\test\ ^
+   tests\image_test.c src\image.c src\config.c src\json.c ^
+   /link /OUT:bin\test\image_test.exe ^
+   user32.lib shell32.lib advapi32.lib ole32.lib windowscodecs.lib ^
+   /SUBSYSTEM:CONSOLE
+if errorlevel 1 (
+    echo [ERROR] image_test build failed
+    popd
+    exit /b 1
+)
+
+bin\test\image_test.exe
+if errorlevel 1 (
+    echo [ERROR] image tests failed
+    popd
+    exit /b 1
+)
+
 echo [OK] all tests passed
 popd

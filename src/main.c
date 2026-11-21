@@ -2,6 +2,7 @@
 #include "version.h"    /* 构建脚本按当前日期生成（版本号 = 编译日期） */
 #include "bridge.h"     /* 降权桥：管理员时替本进程跑 WPS 的 COM 查询 */
 #include "wps.h"        /* WpsBridgeHandler：桥子进程的请求处理 */
+#include "image.h"      /* ImgShutdown：退出时释放图片缓存 */
 #include <stdlib.h>  /* calloc / free */
 #include <stdio.h>   /* _snwprintf_s */
 #include <wchar.h>   /* wcscmp */
@@ -432,6 +433,8 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
     (void)param;
     if (GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"))
         SetThreadDescription(GetCurrentThread(), L"detector");
+    /* 图片形状的 WIC 解码在本线程（OverlayMove）里发生，需要 COM */
+    HRESULT co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     int pollMs = g_cfg.pollMs, trackMs = g_cfg.trackMs;
     /* 中英模式查询（跨进程 SendMessage）仅在其结果会影响显示时才做：
        中文输入法的中文/英文两档至少有一个要显示才查；都不显示时跳过，避免卡顿。 */
@@ -718,6 +721,7 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             if (shown) { OverlaySetVisible(0); shown = 0; }
         }
     }
+    if (SUCCEEDED(co)) CoUninitialize();
     return 0;
 }
 
@@ -822,6 +826,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     BrShutdown();                          /* 通知降权桥子进程收工（它也会自己看父进程） */
     TrayRemove();
     OverlayShutdown();
+    ImgShutdown();
     SingleInstanceRelease();
     return 0;
 }
