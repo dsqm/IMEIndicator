@@ -271,12 +271,6 @@ static void PaintPushButton(const DRAWITEMSTRUCT* di) {
     DrawTextW(di->hDC, txt, -1, &tr,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     SelectObject(di->hDC, of);
-
-    if (di->itemState & ODS_FOCUS) {
-        RECT frc = rc;
-        InflateRect(&frc, -S(3), -S(3));
-        DrawFocusRect(di->hDC, &frc);
-    }
 }
 
 /* 自绘复选框：16px 圆角方块 + 白色对勾，悬停描边变蓝。
@@ -343,12 +337,6 @@ static void PaintCheck(const DRAWITEMSTRUCT* di) {
     DrawTextW(di->hDC, txt, -1, &tr,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     SelectObject(di->hDC, of);
-
-    if (di->itemState & ODS_FOCUS) {
-        RECT frc = rc;
-        InflateRect(&frc, -S(2), -S(2));
-        DrawFocusRect(di->hDC, &frc);
-    }
 }
 
 /* ---------- 控件元数据（建一次，用于按 hwnd 反查字段 / 统一缩放） ---------- */
@@ -796,6 +784,7 @@ static HWND CSlider(int x, int y, int w, int h, int block, int field,
 typedef struct {
     HWND title, enable, inherit, color, shape;
     HWND imgBtn, imgLabel;
+    HWND sep;         /* 块底分隔线：最后一块的分隔线不显示（会变成悬空线） */
     HWND lbl[6];      /* 颜色/形状/尺寸/偏移X/偏移Y/透明度 的静态标签 */
     HWND slSize, vSize, slOffX, vOffX, slOffY, vOffY, slAlpha, vAlpha;
     HWND transient;
@@ -865,6 +854,7 @@ static void BuildStateBlock(int i, int y) {
         WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ, x0, y + 2, WIN_W - 28, 2,
         P, NULL, NULL, NULL);
     RegMeta(sep, -2, 0, NULL, x0, y + 2, WIN_W - 28, 2);
+    b->sep = sep;
 }
 
 /* 隐藏一个块的全部控件 */
@@ -878,6 +868,7 @@ static void HideBlock(int i) {
         if (all[k]) ShowWindow(all[k], SW_HIDE);
     for (int k = 0; k < 6; k++)
         if (b->lbl[k]) ShowWindow(b->lbl[k], SW_HIDE);
+    if (b->sep) ShowWindow(b->sep, SW_HIDE);
     g_blkState[i] = (ImeState)-1;
 }
 
@@ -891,6 +882,7 @@ static void ShowBlock(int i) {
         if (all[k]) ShowWindow(all[k], SW_SHOW);
     for (int k = 0; k < 6; k++)
         if (b->lbl[k]) ShowWindow(b->lbl[k], SW_SHOW);
+    if (b->sep) ShowWindow(b->sep, SW_SHOW);
     /* 跟随开关只对 caps 状态有意义；非 caps 必须显式隐藏，
        否则会留着上一页的状态继续显示 */
     ShowWindow(b->inherit, IsCapsState(g_blkState[i]) ? SW_SHOW : SW_HIDE);
@@ -1164,9 +1156,14 @@ static void CommitForm(void) {
             StateStyle* raw = &s_cfg.st[s];
             raw->enabled = Checked(b->enable);
             raw->have |= SF_ENABLED;
+            /* 跟随中：除「启用 / 跟随」外的控件显示的是基础状态的值，不能写回
+               —— 写回去会把这几个字段变成显式值，之后再改基础状态就不跟了。 */
+            int inherited = 0;
             if (IsCapsState(s)) {
-                raw->inherit = Checked(b->inherit) ? CapsBase(s) : -1;
+                inherited = Checked(b->inherit);
+                raw->inherit = inherited ? CapsBase(s) : -1;
             }
+            if (inherited) continue;
             int sel = (int)SendMessageW(b->shape, CB_GETCURSEL, 0, 0);
             raw->shape = (sel == 0) ? SHAPE_NONE :
                          (sel == 2) ? SHAPE_TRIANGLE :
@@ -1191,6 +1188,51 @@ static void CommitForm(void) {
     /* 黑名单的增删是即时写进 s_cfg 的，不用提交 */
 }
 
+/* ---------- 脏标记 ----------
+   只比"值"，不比 have 位：勾选再取消、把数字改回原值都不算修改。
+   保存按钮与标题星号都跟着这个判断走。 */
+static ImeCfg g_base;
+
+static int StyleSame(const StateStyle* a, const StateStyle* b) {
+    return a->enabled == b->enabled && a->rgb == b->rgb && a->shape == b->shape &&
+           wcscmp(a->image, b->image) == 0 && a->size == b->size &&
+           a->offsetX == b->offsetX && a->offsetY == b->offsetY &&
+           a->alpha == b->alpha && a->transient == b->transient &&
+           a->inherit == b->inherit;
+}
+
+static int CfgSameValues(const ImeCfg* a, const ImeCfg* b) {
+    if (a->pollMs != b->pollMs || a->trackMs != b->trackMs ||
+        a->imeStrategy != b->imeStrategy ||
+        a->caretTimeoutMs != b->caretTimeoutMs ||
+        a->hideFullscreen != b->hideFullscreen ||
+        a->hideComposition != b->hideComposition ||
+        a->wpsCom != b->wpsCom || a->autoHideMs != b->autoHideMs)
+        return 0;
+    if (!StyleSame(&a->def, &b->def)) return 0;
+    for (int i = 0; i < IMEST_COUNT; i++)
+        if (!StyleSame(&a->st[i], &b->st[i])) return 0;
+    if (a->ignoreCount != b->ignoreCount) return 0;
+    for (int i = 0; i < a->ignoreCount; i++)
+        if (_wcsicmp(a->ignore[i], b->ignore[i]) != 0) return 0;
+    return 1;
+}
+
+static void RefreshDirty(void) {
+    if (!g_hwnd) return;
+    CommitForm();
+    g_dirty = !CfgSameValues(&s_cfg, &g_base);
+
+    WCHAR t[96];
+    _snwprintf_s(t, 96, _TRUNCATE, L"IMEIndicator 设置%s", g_dirty ? L" *" : L"");
+    SetWindowTextW(g_hwnd, t);
+
+    HWND b1 = GetDlgItem(g_hwnd, ID_SAVE);
+    HWND b2 = GetDlgItem(g_hwnd, ID_SAVE_RESTART);
+    if (b1) EnableWindow(b1, g_dirty);
+    if (b2) EnableWindow(b2, g_dirty);
+}
+
 /* ---------- 保存 / 重启 ---------- */
 static void DoSave(int restart) {
     CommitForm();
@@ -1200,7 +1242,8 @@ static void DoSave(int restart) {
                     L"保存失败", MB_ICONERROR | MB_OK);
         return;
     }
-    g_dirty = 0;
+    g_base = s_cfg;
+    RefreshDirty();
 
     if (!restart) {
         MessageBoxW(g_hwnd, L"已保存。\n\n重启 IMEIndicator 后生效。",
@@ -1257,6 +1300,13 @@ static void ShowPage(int page) {
     if (page < 5) {
         for (int i = 0; i < 3; i++)
             FillBlock(i, kPages[page].states[i]);
+        /* 最后一块的分隔线会变成页面底部的悬空线，藏掉 */
+        int last = -1;
+        for (int i = 0; i < 3; i++)
+            if ((int)kPages[page].states[i] >= 0) last = i;
+        for (int i = 0; i < 3; i++)
+            if (g_blk[i].sep)
+                ShowWindow(g_blk[i].sep, i < last ? SW_SHOW : SW_HIDE);
     } else if (page == PAGE_GLOBAL) {
         FillGlobalPanel();
     } else {
@@ -1702,7 +1752,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                                 0, 0, 10, 10, h, (HMENU)(INT_PTR)ID_SAVE_RESTART, NULL, NULL);
             SendMessageW(b, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
             MakePushButton(b);
-            b = CreateWindowExW(0, L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            b = CreateWindowExW(0, L"BUTTON", L"退出", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                 0, 0, 10, 10, h, (HMENU)(INT_PTR)ID_CLOSE, NULL, NULL);
             SendMessageW(b, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
             MakePushButton(b);
@@ -1723,6 +1773,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_page = 0;
         g_selState = (int)kPages[0].states[0];
         ShowPage(0);
+        RefreshDirty();          /* 初始无改动：保存按钮置灰，标题不带星号 */
         return 0;
 
     case WM_SIZE: {
@@ -1741,9 +1792,13 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         HWND b1 = GetDlgItem(h, ID_SAVE);
         HWND b2 = GetDlgItem(h, ID_SAVE_RESTART);
         HWND b3 = GetDlgItem(h, ID_CLOSE);
-        if (b1) SetWindowPos(b1, HWND_TOP, S(14), by, S(84), bh, SWP_NOACTIVATE);
-        if (b2) SetWindowPos(b2, HWND_TOP, S(14 + 92), by, S(116), bh, SWP_NOACTIVATE);
-        if (b3) SetWindowPos(b3, HWND_TOP, rc.right - S(14 + 84), by, S(84), bh, SWP_NOACTIVATE);
+        /* 三个按钮统一靠右：保存 / 保存并重启 / 退出 */
+        int bx3 = rc.right - S(14) - S(84);
+        int bx2 = bx3 - S(8) - S(116);
+        int bx1 = bx2 - S(8) - S(84);
+        if (b1) SetWindowPos(b1, HWND_TOP, bx1, by, S(84), bh, SWP_NOACTIVATE);
+        if (b2) SetWindowPos(b2, HWND_TOP, bx2, by, S(116), bh, SWP_NOACTIVATE);
+        if (b3) SetWindowPos(b3, HWND_TOP, bx3, by, S(84), bh, SWP_NOACTIVATE);
         return 0;
     }
 
@@ -1757,8 +1812,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_COMMAND: {
         int code = HIWORD(w);
         HWND ctl = (HWND)l;
-        if (code == EN_CHANGE)    { OnNumEditChanged(ctl); return 0; }
-        if (code == EN_KILLFOCUS) { OnNumEditDone(ctl); return 0; }
+        if (code == EN_CHANGE)    { OnNumEditChanged(ctl); RefreshDirty(); return 0; }
+        if (code == EN_KILLFOCUS) { OnNumEditDone(ctl); RefreshDirty(); return 0; }
         if (code == BN_CLICKED && GetPropW(ctl, CHK_PROP)) {
             /* 自绘复选框不会自己翻转状态，这里补上 */
             int st = (int)SendMessageW(ctl, BM_GETCHECK, 0, 0);
@@ -1767,11 +1822,13 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             InvalidateRect(ctl, NULL, TRUE);
         }
         OnCommand(LOWORD(w), ctl);
+        RefreshDirty();
         return 0;
     }
 
     case WM_HSCROLL:
         OnHScroll((HWND)l);
+        RefreshDirty();
         return 0;
 
     case WM_MOUSEMOVE: {
@@ -1873,6 +1930,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
 
     case WM_CLOSE:
+        RefreshDirty();          /* 以真实值判断：改回原值就不该拦 */
         if (g_dirty) {
             int r = MessageBoxW(h, L"有未保存的修改，要保存吗？",
                                 L"IMEIndicator 设置", MB_YESNOCANCEL | MB_ICONQUESTION);
@@ -1938,6 +1996,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
     InitCommonControlsEx(&icc);
 
     CfgLoad(&s_cfg);
+    g_base = s_cfg;      /* 脏标记的基线 */
 
     RegisterPanelClass(hInst);
 
