@@ -74,6 +74,16 @@ jobs:
         shell: cmd
         run: call build.bat
 
+      - name: Test
+        if: steps.decide.outputs.go == 'true'
+        shell: cmd
+        run: call test.bat
+
+      - name: Package
+        if: steps.decide.outputs.go == 'true'
+        shell: powershell
+        run: Compress-Archive -Path bin/IMEIndicator.exe,bin/IMEIndicatorSettings.exe -DestinationPath IMEIndicator.zip -Force
+
       - name: Create release
         if: steps.decide.outputs.go == 'true'
         env:
@@ -121,7 +131,7 @@ jobs:
             fi
           } > notes.md
 
-          gh release create "$tag" "bin/IMEIndicator.exe" \
+          gh release create "$tag" "IMEIndicator.zip" \
             -R "$repo" \
             --target "$GITHUB_SHA" \
             --title "IMEIndicator v$ver" \

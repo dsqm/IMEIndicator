@@ -32,6 +32,14 @@ jobs:
         shell: cmd
         run: call build.bat
 
+      - name: Test
+        shell: cmd
+        run: call test.bat
+
+      - name: Package
+        shell: powershell
+        run: Compress-Archive -Path bin/IMEIndicator.exe,bin/IMEIndicatorSettings.exe -DestinationPath IMEIndicator.zip -Force
+
       - name: Update nightly release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -92,7 +100,7 @@ jobs:
 
           # ---- 不存在 → 新建 ----
           if [ "$have" = 0 ]; then
-            gh release create nightly "bin/IMEIndicator.exe" -R "$repo" \
+            gh release create nightly "IMEIndicator.zip" -R "$repo" \
               --target "$GITHUB_SHA" \
               --prerelease \
               --title "Nightly Build" \
@@ -111,7 +119,7 @@ jobs:
           # ---- 有新提交 → 就地更新 ----
           # tag 还停在旧提交，先移到 HEAD，Release 的源码快照和对比链接才正确
           git push -f origin "$GITHUB_SHA:refs/tags/nightly"
-          gh release upload nightly "bin/IMEIndicator.exe" -R "$repo" --clobber
+          gh release upload nightly "IMEIndicator.zip" -R "$repo" --clobber
           gh release edit nightly -R "$repo" \
             --title "Nightly Build" \
             --notes-file notes.md

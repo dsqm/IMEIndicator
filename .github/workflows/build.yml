@@ -17,9 +17,17 @@ jobs:
         shell: cmd
         run: call build.bat
 
+      - name: Test
+        shell: cmd
+        run: call test.bat
+
+      - name: Package
+        shell: powershell
+        run: Compress-Archive -Path bin/IMEIndicator.exe,bin/IMEIndicatorSettings.exe -DestinationPath IMEIndicator.zip -Force
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: IMEIndicator-${{ github.sha }}
-          path: bin/IMEIndicator.exe
+          path: IMEIndicator.zip
           if-no-files-found: error
