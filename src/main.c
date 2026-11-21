@@ -22,6 +22,10 @@ volatile LONG g_showDot = 0;
 #define IDM_GITHUB  1005
 #define IDM_OPENCFGDIR 1006
 
+/* 托盘图标重试 */
+#define IDT_TRAY_RETRY   1
+#define TRAY_MAX_RETRY   5
+
 static HWND  g_trayWnd = NULL;
 static HICON g_icon = NULL;
 static UINT  g_msgTaskbarCreated = 0;   /* explorer 重启通知 */
@@ -256,7 +260,7 @@ static void RestartApp(void) {
     PostQuitMessage(0);
 }
 
-static void TrayAddIcon(void);   /* 前向声明：explorer 重启时要重新挂图标 */
+static BOOL TrayAddIcon(void);   /* 前向声明：explorer 重启时要重新挂图标 */
 
 static LRESULT CALLBACK TrayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     /* explorer 重启：系统把整个通知区清空，图标连同悬停提示一起没了，
@@ -280,6 +284,13 @@ static LRESULT CALLBACK TrayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         return 0;
+    } else if (m == WM_TIMER) {
+        /* 托盘图标重试（见 TrayAddIcon） */
+        if (w == IDT_TRAY_RETRY) {
+            KillTimer(h, IDT_TRAY_RETRY);
+            TrayAddIcon();
+            return 0;
+        }
     } else if (m == WM_DESTROY) {
         PostQuitMessage(0);
         return 0;
@@ -290,9 +301,15 @@ static LRESULT CALLBACK TrayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 /* 悬停提示：程序名 + 权限标注。
    权限查**进程令牌**而不是配置值 —— 配置与实际不一致时不会误导。
    文案是静态的（两个信息都不会变），所以只要每次挂图标都写完整文案，
-   explorer 重启后重新挂也自然正确。 */
-static void TrayAddIcon(void) {
-    if (!g_trayWnd) return;
+   explorer 重启后重新挂也自然正确。
+
+   ★ 挂失败必须能自愈：任务栏还没就绪、或进程处在受限的作业对象里时
+     Shell_NotifyIcon 会直接返回 ERROR_ACCESS_DENIED。一次失败就放弃的话，
+     表现就是"程序压根没启动"。这里重试几次，彻底失败再弹一次提示。 */
+static int g_trayRetry = 0;
+
+static BOOL TrayAddIcon(void) {
+    if (!g_trayWnd) return FALSE;
     NOTIFYICONDATAW nid;
     ZeroMemory(&nid, sizeof(nid));
     nid.cbSize = sizeof(nid);
@@ -304,7 +321,24 @@ static void TrayAddIcon(void) {
     _snwprintf_s(nid.szTip, sizeof(nid.szTip) / sizeof(WCHAR), _TRUNCATE,
                  L"%s v%s%s", APP_NAME, IME_VER_W,
                  ProcIsElevated() ? L"（管理员）" : L"");
-    Shell_NotifyIconW(NIM_ADD, &nid);
+    BOOL ok = Shell_NotifyIconW(NIM_ADD, &nid);
+    if (ok) {
+        g_trayRetry = 0;
+        return TRUE;
+    }
+    DWORD err = GetLastError();
+    if (g_trayRetry < TRAY_MAX_RETRY) {
+        g_trayRetry++;
+        SetTimer(g_trayWnd, IDT_TRAY_RETRY, 700, NULL);
+        DbgLog(L"tray: add failed err=%lu, retry %d/%d", err, g_trayRetry, TRAY_MAX_RETRY);
+    } else {
+        DbgLog(L"tray: add failed err=%lu, giving up", err);
+        MessageBoxW(NULL,
+                    L"托盘图标注册失败，程序仍会在光标旁显示提示，但无法从托盘操作。\n\n"
+                    L"请用任务管理器结束 IMEIndicator 进程后重新启动。",
+                    L"IMEIndicator", MB_ICONWARNING | MB_OK);
+    }
+    return FALSE;
 }
 
 static void TrayInstall(void) {
@@ -329,6 +363,7 @@ static void TrayInstall(void) {
 
 static void TrayRemove(void) {
     if (!g_trayWnd) return;
+    KillTimer(g_trayWnd, IDT_TRAY_RETRY);
     NOTIFYICONDATAW nid;
     ZeroMemory(&nid, sizeof(nid));
     nid.cbSize = sizeof(nid);
@@ -731,7 +766,15 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
         return rc;
     }
 
-    if (!SingleInstanceAcquire()) return 0;   /* 已有一个实例在跑，直接退出 */
+    /* 已有一个实例在跑：不能静默退出 —— 双击第二次时什么都不发生，看起来就是
+       "程序没启动"。这里给一条明确反馈，顺带提示托盘图标可能被 Win11 折叠了。 */
+    if (!SingleInstanceAcquire()) {
+        MessageBoxW(NULL,
+                    L"IMEIndicator 已经在运行。\n\n"
+                    L"如果任务栏右下角看不到它的图标，点一下那里的 ^ 展开隐藏的托盘图标。",
+                    L"IMEIndicator", MB_ICONINFORMATION | MB_OK);
+        return 0;
+    }
 
     g_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 

@@ -46,7 +46,7 @@ rem /W4: warn clean. /Brepro: reproducible build. /TP: compile as C++ so the
 rem COM / UIAutomation calls (p->Method()) compile without CINTERFACE macros.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Fobin\ ^
-   src\main.c src\config.c src\json.c src\ime.c src\caret.c src\wps.c src\bridge.c src\overlay.c src\debug.c ^
+   src\main.c src\config.c src\json.c src\ime.c src\caret.c src\wps.c src\bridge.c src\overlay.c src\shape.c src\debug.c ^
    /link /OUT:bin/IMEIndicator.exe ^
    bin\ime.res ^
    user32.lib gdi32.lib shell32.lib ole32.lib oleaut32.lib imm32.lib oleacc.lib comctl32.lib advapi32.lib ^
@@ -62,9 +62,9 @@ rem Separate exe on purpose: the main program usually runs elevated, and the
 rem settings must be able to start unelevated to write the portable config.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Fobin\ ^
-   src\settings.c src\config.c src\json.c ^
+   src\settings.c src\config.c src\json.c src\shape.c ^
    /link /OUT:bin/IMEIndicatorSettings.exe ^
-   user32.lib gdi32.lib shell32.lib comctl32.lib comdlg32.lib ole32.lib oleaut32.lib advapi32.lib ^
+   user32.lib gdi32.lib msimg32.lib shell32.lib comctl32.lib comdlg32.lib ole32.lib oleaut32.lib advapi32.lib ^
    /SUBSYSTEM:WINDOWS
 
 if errorlevel 1 (

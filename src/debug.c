@@ -4,18 +4,26 @@
 #include <stdarg.h>
 
 /* ================= 调试日志 =================
-   托盘「记录日志」开关把 g_logging 置 1 后，检测线程每次循环写一行。
+   托盘「记录日志」开关把 g_logging 置 1 后写日志。
    日志写到 exe 同目录 log\ 子目录，每个进程会话**新建一个**以时间命名的
    文件（log\IMEIndicator-YYYYMMDD-HHMMSS.log），一次会话一个文件，
-   不会无限追加变长。只有检测线程写文件，托盘切换只翻 g_logging 标志，
-   避免跨线程文件句柄竞争。 */
+   不会无限追加变长。
+
+   ★ 主线程（托盘图标挂载失败）和检测线程都会写，所以文件句柄用临界区保护。
+     原先默认"只有检测线程写"，加托盘诊断时就出现了跨线程并发写。 */
 
 volatile LONG g_logging = 0;
 
 static WCHAR g_dir[MAX_PATH] = L"";
 static FILE*  g_fp = NULL;
+static CRITICAL_SECTION g_lock;
+static int    g_lockInit = 0;
 
 void DbgInit(void) {
+    if (!g_lockInit) {
+        InitializeCriticalSection(&g_lock);
+        g_lockInit = 1;
+    }
     WCHAR exe[MAX_PATH]; DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
     WCHAR* slash = NULL;
     for (DWORD i = 0; i < n; i++) if (exe[i] == L'\\') slash = &exe[i];
@@ -59,30 +67,40 @@ static void DebugClose(void) {
 
 void DbgLog(const WCHAR* fmt, ...) {
     if (!g_logging) return;
+    if (g_lockInit) EnterCriticalSection(&g_lock);
     if (!g_fp) DebugOpen();
-    if (!g_fp) return;
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    WCHAR head[32];
-    _snwprintf_s(head, 32, _TRUNCATE, L"[%02u:%02u:%02u.%03u] ",
-                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    fputws(head, g_fp);
-    va_list ap;
-    va_start(ap, fmt);
-    vfwprintf(g_fp, fmt, ap);
-    va_end(ap);
-    fputwc(L'\n', g_fp);
-    fflush(g_fp);
-    /* 到上限就换文件：关掉句柄，下次 DbgLog 会按新时间另开一个 */
-    if (_ftelli64(g_fp) > DBG_MAX_BYTES) DebugClose();
+    if (g_fp) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        WCHAR head[32];
+        _snwprintf_s(head, 32, _TRUNCATE, L"[%02u:%02u:%02u.%03u] ",
+                     st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        fputws(head, g_fp);
+        va_list ap;
+        va_start(ap, fmt);
+        vfwprintf(g_fp, fmt, ap);
+        va_end(ap);
+        fputwc(L'\n', g_fp);
+        fflush(g_fp);
+        /* 到上限就换文件：关掉句柄，下次 DbgLog 会按新时间另开一个 */
+        if (_ftelli64(g_fp) > DBG_MAX_BYTES) DebugClose();
+    }
+    if (g_lockInit) LeaveCriticalSection(&g_lock);
 }
 
 void DbgShutdown(void) {
-    DebugClose();
+    if (g_lockInit) {
+        EnterCriticalSection(&g_lock);
+        DebugClose();
+        LeaveCriticalSection(&g_lock);
+        DeleteCriticalSection(&g_lock);
+        g_lockInit = 0;
+    }
 }
 
-/* 托盘关闭日志时释放文件句柄（否则文件一直被占用，无法删除/改名）。
-   由检测线程在 g_logging 下降沿调用，保证文件只被一个线程碰。 */
+/* 托盘关闭日志时释放文件句柄（否则文件一直被占用，无法删除/改名）。 */
 void DbgClose(void) {
+    if (g_lockInit) EnterCriticalSection(&g_lock);
     DebugClose();
+    if (g_lockInit) LeaveCriticalSection(&g_lock);
 }

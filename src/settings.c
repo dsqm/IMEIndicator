@@ -1,9 +1,11 @@
 #include "ime_indicator.h"
+#include "shape.h"
 #include <stdio.h>
 #include <wchar.h>
 #include <commctrl.h>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "msimg32.lib")   /* AlphaBlend：预览贴抗锯齿图形用 */
 
 /* ================= IMEIndicator 设置程序 =================
    独立 exe，纯 Win32。分页表单（原型变体 C）：自定义页签 + 预览条 + 表单。
@@ -336,22 +338,37 @@ static LRESULT CALLBACK PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (sz > S(96)) sz = S(96);
             int x = caretX + S(st.offsetX);
             int y = baseY + S(st.offsetY);
-            COLORREF col = RGB((st.rgb >> 16) & 0xFF, (st.rgb >> 8) & 0xFF, st.rgb & 0xFF);
-            HBRUSH b = CreateSolidBrush(col);
-            HGDIOBJ oldB = SelectObject(dc, b);
-            HGDIOBJ oldP = SelectObject(dc, GetStockObject(NULL_PEN));
-            if (st.shape == SHAPE_TRIANGLE) {
-                POINT pts[3];
-                pts[0].x = x + sz / 2; pts[0].y = y;
-                pts[1].x = x + sz;     pts[1].y = y + sz;
-                pts[2].x = x;          pts[2].y = y + sz;
-                Polygon(dc, pts, 3);
-            } else {
-                Ellipse(dc, x, y, x + sz, y + sz);
+
+            int shape = st.shape;
+            if (shape == SHAPE_IMAGE) shape = SHAPE_CIRCLE;   /* 二期才实现 */
+
+            /* 走和悬浮窗**同一份**光栅化再 AlphaBlend 贴上去：
+               用 GDI 的 Ellipse/Polygon 是无抗锯齿的，预览就会比实际毛糙。 */
+            BITMAPINFO bmi;
+            ZeroMemory(&bmi, sizeof(bmi));
+            bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+            bmi.bmiHeader.biWidth = sz;
+            bmi.bmiHeader.biHeight = -sz;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            void* bits = NULL;
+            HDC mem = CreateCompatibleDC(dc);
+            HBITMAP bmp = mem ? CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+            if (mem && bmp && bits) {
+                HGDIOBJ oldBmp = SelectObject(mem, bmp);
+                ShapeRasterize((BYTE*)bits, sz, st.rgb, st.alpha, shape);
+                BLENDFUNCTION bf;
+                bf.BlendOp = AC_SRC_OVER;
+                bf.BlendFlags = 0;
+                bf.SourceConstantAlpha = 255;
+                bf.AlphaFormat = AC_SRC_ALPHA;
+                AlphaBlend(dc, x, y, sz, sz, mem, 0, 0, sz, sz, bf);
+                SelectObject(mem, oldBmp);
             }
-            SelectObject(dc, oldP);
-            SelectObject(dc, oldB);
-            DeleteObject(b);
+            if (bmp) DeleteObject(bmp);
+            if (mem) DeleteDC(mem);
         }
         EndPaint(h, &ps);
         return 0;
@@ -422,7 +439,15 @@ static int BuildStateBlock(ImeState s, int y) {
     }
     y += 46;
 
-    CCheck(L"状态变化后只显示一会儿", lx, y, 220, 22, (int)s, F_TRANSIENT, eff.transient);
+    /* 文案带上真实时长：写死"一会儿"看不出到底是多少 */
+    WCHAR trText[96];
+    if (s_cfg.autoHideMs > 0)
+        _snwprintf_s(trText, 96, _TRUNCATE,
+                     L"状态变化后只显示 %d ms", s_cfg.autoHideMs);
+    else
+        _snwprintf_s(trText, 96, _TRUNCATE,
+                     L"状态变化后常显（全局已关闭临时显示）");
+    CCheck(trText, lx, y, 330, 22, (int)s, F_TRANSIENT, eff.transient);
     y += 22;
 
     /* 跟随状态下整块置灰（启用与跟随本身除外） */
@@ -526,7 +551,10 @@ static void BuildForm(void) {
     else if (g_page == PAGE_GLOBAL) BuildGlobalPage();
     else BuildIgnorePage();
     ScaleControls();
-    InvalidateRect(g_hwnd, NULL, TRUE);
+    /* 不擦背景（FALSE）：WM_PAINT 里整片重画，先擦再画会闪。
+       窗口带 WS_EX_COMPOSITED，整帧在离屏缓冲里合成后一次性贴出，
+       切页时不会看到从上到下的扫描。 */
+    InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
 /* ---------- 提交 ---------- */
@@ -1057,7 +1085,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
     int wx = wa.left + (waw - ww) / 2;
     int wy = wa.top + (wah - wh) / 2;
 
-    HWND h = CreateWindowExW(0, cls, L"IMEIndicator 设置",
+    HWND h = CreateWindowExW(WS_EX_COMPOSITED, cls, L"IMEIndicator 设置",
                              style,
                              wx, wy, ww, wh,
                              NULL, NULL, hInst, NULL);

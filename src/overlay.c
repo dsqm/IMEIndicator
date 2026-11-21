@@ -1,4 +1,5 @@
 #include "ime_indicator.h"
+#include "shape.h"
 
 /* ================= 悬浮提示窗口 =================
    WS_EX_LAYERED + WS_EX_TRANSPARENT + WS_EX_TOPMOST + WS_EX_NOACTIVATE：
@@ -152,69 +153,10 @@ static int EnsureSurface(void) {
     return 1;
 }
 
-/* 4x4 子采样抗锯齿画形状，写进缓存的 DIB。
-   形状只影响"这个采样点算不算在图形内"，外围（DIB 缓存、预乘、
-   位置未变跳过重绘）与形状无关 —— 加形状不用动那些。 */
-
-/* 圆形：fx,fy 是相对图形中心的偏移，half 是内切半径 */
-static int InsideCircle(double fx, double fy, double half) {
-    return (fx * fx + fy * fy) <= half * half;
-}
-
-/* 等边三角形，尖角朝上。尺寸取「宽 = 圆的直径」：等边三角形的高只有宽的
-   √3/2 ≈ 0.866（这是它本来的比例，宽>高才对——之前把半宽公式用错，
-   高比宽大 30%，看着又瘦又高）。与圆同宽则视觉等大，高略矮是正常形。
-   光学修正：三角形的视觉重心偏底边（底边重、尖角轻），按几何中心摆会显得
-   整体偏下，所以整体向上移 5% 高度（设计圈惯用做法，Play 按钮同款问题）。
-   判定用"点与三条有向边同侧"（叉积同号）。 */
-static int InsideTriangle(double fx, double fy, double half) {
-    const double W  = half * 2.0;            /* 全宽 = 圆直径 */
-    const double Ht = W * 0.8660254038;      /* 全高 = 宽×√3/2（等边） */
-    const double dy = -Ht * 0.05;            /* 光学：向上微移 5% */
-    const double hw = W * 0.5;               /* 半宽 */
-    const double hh = Ht * 0.5;              /* 半高 */
-    /* 顶点（相对画布中心）：尖 (0,-hh+dy)、左下 (-hw,hh+dy)、右下 (hw,hh+dy) */
-    const double ax = 0.0, ay = -hh + dy;
-    const double bx = -hw, by = hh + dy;
-    const double cx2 = hw, cy2 = hh + dy;
-    double d1 = (bx - ax) * (fy - ay) - (by - ay) * (fx - ax);
-    double d2 = (cx2 - bx) * (fy - by) - (cy2 - by) * (fx - bx);
-    double d3 = (ax - cx2) * (fy - cy2) - (ay - cy2) * (fx - cx2);
-    int neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
-    int pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
-    return !(neg && pos);                  /* 三个叉积同号（含 0）= 在内部 */
-}
-
+/* 画当前形状进缓存的 DIB。形状本身由 shape.c 提供（与设置程序预览共用
+   同一份光栅化，保证"预览看到的 = 实际看到的"）。 */
 static void PaintDot(void) {
-    int sz = g_bmpSize;
-    /* 预乘：UpdateLayeredWindow + AC_SRC_ALPHA 需要预乘 alpha */
-    int pr = (g_cr * g_alpha + 127) / 255;
-    int pg = (g_cg * g_alpha + 127) / 255;
-    int pb = (g_cb * g_alpha + 127) / 255;
-
-    double cx = (sz - 1) / 2.0, cy = (sz - 1) / 2.0;
-    double r = (sz / 2.0) - 0.5;         /* 图形中心到边的内切半径，留 1px 抗锯齿 */
-    const int SS = 4;                     /* 4x4 子采样抗锯齿 */
-    BYTE* p = (BYTE*)g_bits;
-    for (int y = 0; y < sz; y++) {
-        for (int x = 0; x < sz; x++) {
-            int inside = 0;
-            for (int syy = 0; syy < SS; syy++)
-                for (int sxx = 0; sxx < SS; sxx++) {
-                    double fx = x + (sxx + 0.5) / SS - cx;
-                    double fy = y + (syy + 0.5) / SS - cy;
-                    if (g_shape == SHAPE_TRIANGLE) {
-                        if (InsideTriangle(fx, fy, r)) inside++;
-                    } else if (InsideCircle(fx, fy, r)) inside++;
-                }
-            int a = (g_alpha * inside + (SS * SS - 1)) / (SS * SS);
-            p[0] = (BYTE)((pb * a + 127) / 255);   /* B 预乘 */
-            p[1] = (BYTE)((pg * a + 127) / 255);
-            p[2] = (BYTE)((pr * a + 127) / 255);
-            p[3] = (BYTE)a;
-            p += 4;
-        }
-    }
+    ShapeRasterize((BYTE*)g_bits, g_bmpSize, g_style.rgb, g_alpha, g_shape);
     g_bmpDirty = 0;
 }
 
