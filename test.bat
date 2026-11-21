@@ -2,7 +2,7 @@
 rem ===== IMEIndicator tests (MSVC x64) =====
 rem ASCII only (cmd.exe reads .bat as ANSI).
 rem
-rem Config tests run inside bin\test\ so CfgSave/CfgLoad (which use the exe's
+rem Config tests run inside obj\test\ so CfgSave/CfgLoad (which use the exe's
 rem own directory) never touch the real IMEIndicator.json next to the main program.
 setlocal
 pushd "%~dp0"
@@ -13,13 +13,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "bin\test" mkdir "bin\test"
+if not exist "obj\test" mkdir "obj\test"
 
 rem ---- config layer: JSON round-trip, defaults, inherit, migration, blacklist ----
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Fobin\test\ ^
+   /Foobj\test\ ^
    tests\config_test.c src\config.c src\json.c ^
-   /link /OUT:bin\test\config_test.exe ^
+   /link /OUT:obj\test\config_test.exe ^
    user32.lib shell32.lib advapi32.lib ^
    /SUBSYSTEM:CONSOLE
 if errorlevel 1 (
@@ -28,7 +28,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-bin\test\config_test.exe
+obj\test\config_test.exe
 if errorlevel 1 (
     echo [ERROR] config tests failed
     popd
@@ -37,9 +37,9 @@ if errorlevel 1 (
 
 rem ---- shape rasterizer: area, antialiasing, premultiplied alpha ----
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Fobin\test\ ^
+   /Foobj\test\ ^
    tests\shape_test.c src\shape.c ^
-   /link /OUT:bin\test\shape_test.exe ^
+   /link /OUT:obj\test\shape_test.exe ^
    /SUBSYSTEM:CONSOLE
 if errorlevel 1 (
     echo [ERROR] shape_test build failed
@@ -47,7 +47,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-bin\test\shape_test.exe
+obj\test\shape_test.exe
 if errorlevel 1 (
     echo [ERROR] shape tests failed
     popd
@@ -56,9 +56,9 @@ if errorlevel 1 (
 
 rem ---- image shapes: WIC decode, aspect scaling, import dedup ----
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Fobin\test\ ^
+   /Foobj\test\ ^
    tests\image_test.c src\image.c src\config.c src\json.c ^
-   /link /OUT:bin\test\image_test.exe ^
+   /link /OUT:obj\test\image_test.exe ^
    user32.lib shell32.lib advapi32.lib ole32.lib windowscodecs.lib ^
    /SUBSYSTEM:CONSOLE
 if errorlevel 1 (
@@ -67,7 +67,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-bin\test\image_test.exe
+obj\test\image_test.exe
 if errorlevel 1 (
     echo [ERROR] image tests failed
     popd

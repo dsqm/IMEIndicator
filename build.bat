@@ -1,12 +1,14 @@
 @echo off
 rem ===== IMEIndicator portable build script (MSVC x64) =====
 rem ASCII only (cmd.exe reads .bat as ANSI).
+rem Intermediate files (.obj/.res) go to obj\; bin\ holds only the exes.
 setlocal
 
 call "%~dp0build_env.bat"
 if errorlevel 1 exit /b 1
 
 if not exist "bin" mkdir bin
+if not exist "obj" mkdir obj
 
 rem ===== Version = build date (auto-generated, only rewritten when changed) =====
 rem src\version.h is consumed by src\ime.rc (VERSIONINFO) and src\main.c
@@ -36,7 +38,7 @@ if errorlevel 1 (
     del "%VERFILE%.new"
 )
 
-rc /nologo /fo bin\ime.res src\ime.rc
+rc /nologo /fo obj\ime.res src\ime.rc
 if errorlevel 1 (
     echo [ERROR] rc failed
     exit /b 1
@@ -45,10 +47,10 @@ if errorlevel 1 (
 rem /W4: warn clean. /Brepro: reproducible build. /TP: compile as C++ so the
 rem COM / UIAutomation calls (p->Method()) compile without CINTERFACE macros.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Fobin\ ^
+   /Foobj\ ^
    src\main.c src\config.c src\json.c src\ime.c src\caret.c src\wps.c src\bridge.c src\overlay.c src\shape.c src\image.c src\debug.c ^
    /link /OUT:bin/IMEIndicator.exe ^
-   bin\ime.res ^
+   obj\ime.res ^
    user32.lib gdi32.lib shell32.lib ole32.lib oleaut32.lib imm32.lib oleacc.lib comctl32.lib advapi32.lib windowscodecs.lib ^
    /SUBSYSTEM:WINDOWS
 
@@ -61,7 +63,7 @@ rem ===== Settings app =====
 rem Separate exe on purpose: the main program usually runs elevated, and the
 rem settings must be able to start unelevated to write the portable config.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Fobin\ ^
+   /Foobj\ ^
    src\settings.c src\config.c src\json.c src\shape.c src\image.c ^
    /link /OUT:bin/IMEIndicatorSettings.exe ^
    user32.lib gdi32.lib msimg32.lib shell32.lib comctl32.lib comdlg32.lib ole32.lib oleaut32.lib advapi32.lib windowscodecs.lib ^

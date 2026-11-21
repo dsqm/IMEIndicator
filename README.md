@@ -141,6 +141,8 @@ build.bat      # 产出 bin\IMEIndicator.exe 和 bin\IMEIndicatorSettings.exe
 test.bat       # 跑配置层、形状光栅化与图片解码的单元测试
 ```
 
+中间产物（`.obj` / `.res` / 测试 exe）都落在 `obj\`，`bin\` 只放成品 exe。
+
 许可证 GPL-3.0-or-later，见 `LICENSE`。
 
 ## 自定义图片
