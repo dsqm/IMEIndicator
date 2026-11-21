@@ -234,6 +234,42 @@ static void PaintLineAA(HDC dc, POINT a, POINT b, double halfWidth, COLORREF c) 
     DeleteObject(pen);
 }
 
+/* 双缓冲：把整块控件画进内存位图，最后一次性贴回。
+   自绘控件里既有背景填充又有图层混合，直接画到窗口 DC 上，鼠标一移动、
+   悬停高亮一变，屏幕就会亮一帧空白再补上内容 —— 表现得像闪烁。 */
+typedef struct {
+    HDC     mem;
+    HBITMAP bmp;
+    HGDIOBJ old;
+    int     w, h;
+} BufDC;
+
+static int BufBegin(BufDC* b, HDC ref, int w, int h) {
+    ZeroMemory(b, sizeof(*b));
+    if (w <= 0 || h <= 0) return 0;
+    b->mem = CreateCompatibleDC(ref);
+    if (!b->mem) return 0;
+    b->bmp = CreateCompatibleBitmap(ref, w, h);
+    if (!b->bmp) {
+        DeleteDC(b->mem);
+        ZeroMemory(b, sizeof(*b));
+        return 0;
+    }
+    b->old = SelectObject(b->mem, b->bmp);
+    b->w = w;
+    b->h = h;
+    return 1;
+}
+
+static void BufEnd(BufDC* b, HDC dc) {
+    if (!b || !b->mem) return;
+    BitBlt(dc, 0, 0, b->w, b->h, b->mem, 0, 0, SRCCOPY);
+    SelectObject(b->mem, b->old);
+    DeleteObject(b->bmp);
+    DeleteDC(b->mem);
+    ZeroMemory(b, sizeof(*b));
+}
+
 /* ---------- 自绘按钮 ----------
    参考 CapsEnhance 设置程序的观感：圆角、主按钮蓝底白字、次按钮浅底灰边，
    悬停淡蓝、按下加深。系统默认按钮是 Win95 的浮凸方块，和现在的页签/预览
@@ -652,6 +688,45 @@ static void SelPaint(HWND h, HDC dc) {
     }
 }
 
+static void SelPopupPaint(HWND h, HDC dc) {
+    SelData* d = SelOf(h);
+    RECT rc;
+    GetClientRect(h, &rc);
+    HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+
+    /* 圆角外缘由窗口区域裁剪，那条边本来就是硬的；这里只画 1px 内边框。
+       （别在这里叠抗锯齿图层：整个列表每次鼠标移动都要重画一遍，白算。） */
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xAD, 0xAD, 0xAD));
+    HGDIOBJ op = SelectObject(dc, pen);
+    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    RoundRect(dc, 0, 0, rc.right - 1, rc.bottom - 1, S(8), S(8));
+    SelectObject(dc, op);
+    SelectObject(dc, ob);
+    DeleteObject(pen);
+
+    HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+    if (!f) f = BaseFont();
+    HGDIOBJ of = SelectObject(dc, f);
+    SetBkMode(dc, TRANSPARENT);
+    int ih = S(SEL_ITEM_H);
+    for (int i = 0; d && i < d->count; i++) {
+        RECT r = { S(4), S(4) + i * ih, rc.right - S(4), S(4) + (i + 1) * ih };
+        if (i == d->hot) {
+            HBRUSH hb = CreateSolidBrush(RGB(0xE5, 0xF1, 0xFB));
+            FillRect(dc, &r, hb);
+            DeleteObject(hb);
+        }
+        SetTextColor(dc, i == d->sel ? RGB(0x00, 0x5A, 0x9E) : RGB(0x00, 0x00, 0x00));
+        RECT tr = r;
+        tr.left += S(8);
+        DrawTextW(dc, d->items[i], -1, &tr,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    SelectObject(dc, of);
+}
+
 static LRESULT CALLBACK SelPopupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     SelData* d = SelOf(h);
     switch (m) {
@@ -660,32 +735,14 @@ static LRESULT CALLBACK SelPopupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         HDC dc = BeginPaint(h, &ps);
         RECT rc;
         GetClientRect(h, &rc);
-        HBRUSH bg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
-        FillRect(dc, &rc, bg);
-        DeleteObject(bg);
-
-        RECT brd = { 0, 0, rc.right, rc.bottom };
-        PaintRoundRectAA(dc, &brd, S(4), RGB(0xAD, 0xAD, 0xAD), RGB(0xFF, 0xFF, 0xFF));
-
-        HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
-        if (!f) f = BaseFont();
-        HGDIOBJ of = SelectObject(dc, f);
-        SetBkMode(dc, TRANSPARENT);
-        int ih = S(SEL_ITEM_H);
-        for (int i = 0; d && i < d->count; i++) {
-            RECT r = { S(4), S(4) + i * ih, rc.right - S(4), S(4) + (i + 1) * ih };
-            if (i == d->hot) {
-                HBRUSH hb = CreateSolidBrush(RGB(0xE5, 0xF1, 0xFB));
-                FillRect(dc, &r, hb);
-                DeleteObject(hb);
-            }
-            SetTextColor(dc, i == d->sel ? RGB(0x00, 0x5A, 0x9E) : RGB(0x00, 0x00, 0x00));
-            RECT tr = r;
-            tr.left += S(8);
-            DrawTextW(dc, d->items[i], -1, &tr,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        /* 双缓冲：悬停高亮在列表里上下移动时不能闪 */
+        BufDC buf;
+        if (BufBegin(&buf, dc, rc.right, rc.bottom)) {
+            SelPopupPaint(h, buf.mem);
+            BufEnd(&buf, dc);
+        } else {
+            SelPopupPaint(h, dc);
         }
-        SelectObject(dc, of);
         EndPaint(h, &ps);
         return 0;
     }
@@ -761,7 +818,15 @@ static LRESULT CALLBACK SelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
-        SelPaint(h, dc);
+        RECT rc;
+        GetClientRect(h, &rc);
+        BufDC buf;
+        if (BufBegin(&buf, dc, rc.right, rc.bottom)) {
+            SelPaint(h, buf.mem);
+            BufEnd(&buf, dc);
+        } else {
+            SelPaint(h, dc);
+        }
         EndPaint(h, &ps);
         return 0;
     }
@@ -1317,6 +1382,7 @@ static void BuildPreviewSwitch(HWND parent) {
         SetWindowLongPtrW(g_swState, GWLP_USERDATA, (LONG_PTR)d);
     }
     SendMessageW(g_swState, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
+    /* 项的顺序必须与 PreviewStates() 一致（都按状态枚举顺序） */
     for (int p = 0; p < 5; p++) {
         for (int k = 0; k < 3; k++) {
             ImeState s = kPages[p].states[k];
