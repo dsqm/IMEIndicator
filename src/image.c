@@ -55,21 +55,20 @@ static void ShapesDir(WCHAR* out, size_t cap) {
 
 /* ---------- 解码 ---------- */
 
-static int Decode(const WCHAR* path, int* ow, int* oh, BYTE** obits,
-                  WCHAR* err, size_t cap) {
+/* 打开文件并挑出面积最大的帧（ICO 的多帧是不同尺寸，直接取第 0 帧会拿到 16×16）。
+   成功时 *pfac / *pdec / *pframe 归调用方释放，*pw / *ph 是原始像素尺寸。 */
+static int OpenBestFrame(const WCHAR* path, IWICImagingFactory** pfac,
+                         IWICBitmapDecoder** pdec, IWICBitmapFrameDecode** pframe,
+                         UINT* pw, UINT* ph, WCHAR* err, size_t cap) {
     IWICImagingFactory*    fac = NULL;
     IWICBitmapDecoder*     dec = NULL;
     IWICBitmapFrameDecode* frame = NULL;
-    IWICBitmapScaler*      scaler = NULL;
-    IWICFormatConverter*   conv = NULL;
-    IWICBitmapSource*      src = NULL;
-    BYTE* buf = NULL;
-    UINT  count = 0, best = 0, bw = 0, bh = 0, tw = 0, th = 0;
-    UINT  stride = 0, size = 0;
-    int   ok = 0;
+    UINT  count = 0, best = 0, bw = 0, bh = 0;
     HRESULT hr;
 
-    *obits = NULL;
+    *pfac = NULL;
+    *pdec = NULL;
+    *pframe = NULL;
 
     hr = CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
                           IID_IWICImagingFactory, (void**)&fac);
@@ -82,15 +81,14 @@ static int Decode(const WCHAR* path, int* ow, int* oh, BYTE** obits,
                                         WICDecodeMetadataCacheOnDemand, &dec);
     if (FAILED(hr)) {
         SetErr(err, cap, L"无法打开图片 (0x%08X)", (unsigned)hr);
-        goto done;
+        goto fail;
     }
 
     if (FAILED(dec->GetFrameCount(&count)) || count == 0) {
         SetErr(err, cap, L"图片里没有可用的帧");
-        goto done;
+        goto fail;
     }
 
-    /* ICO 的多帧是不同尺寸：挑面积最大的那帧 */
     for (UINT i = 0; i < count; i++) {
         IWICBitmapFrameDecode* f = NULL;
         if (SUCCEEDED(dec->GetFrame(i, &f))) {
@@ -104,10 +102,70 @@ static int Decode(const WCHAR* path, int* ow, int* oh, BYTE** obits,
     }
     if (bw == 0 || bh == 0) {
         SetErr(err, cap, L"图片尺寸无效");
-        goto done;
+        goto fail;
     }
     if (FAILED(dec->GetFrame(best, &frame))) {
         SetErr(err, cap, L"读取图片帧失败");
+        goto fail;
+    }
+
+    *pfac = fac;
+    *pdec = dec;
+    *pframe = frame;
+    *pw = bw;
+    *ph = bh;
+    return 1;
+
+fail:
+    if (frame) frame->Release();
+    if (dec)   dec->Release();
+    if (fac)   fac->Release();
+    return 0;
+}
+
+/* 尺寸上限：单边与总像素都查，挡住「高压缩比小文件解出巨图」 */
+static int TooBig(UINT w, UINT h) {
+    return w > IMG_MAX_EDGE || h > IMG_MAX_EDGE ||
+           (ULONGLONG)w * h > IMG_MAX_PIXELS;
+}
+
+static void SetTooBigErr(WCHAR* err, size_t cap, UINT w, UINT h) {
+    SetErr(err, cap, L"图片尺寸太大（%u×%u；上限 %u×%u、%u 万像素）",
+           w, h, IMG_MAX_EDGE, IMG_MAX_EDGE, IMG_MAX_PIXELS / 10000u);
+}
+
+/* 只读文件头拿尺寸，不解像素 —— 导入前用它做校验 */
+static int Probe(const WCHAR* path, UINT* pw, UINT* ph, WCHAR* err, size_t cap) {
+    IWICImagingFactory*    fac = NULL;
+    IWICBitmapDecoder*     dec = NULL;
+    IWICBitmapFrameDecode* frame = NULL;
+    int ok = OpenBestFrame(path, &fac, &dec, &frame, pw, ph, err, cap);
+    if (frame) frame->Release();
+    if (dec)   dec->Release();
+    if (fac)   fac->Release();
+    return ok;
+}
+
+static int Decode(const WCHAR* path, int* ow, int* oh, BYTE** obits,
+                  WCHAR* err, size_t cap) {
+    IWICImagingFactory*    fac = NULL;
+    IWICBitmapDecoder*     dec = NULL;
+    IWICBitmapFrameDecode* frame = NULL;
+    IWICBitmapScaler*      scaler = NULL;
+    IWICFormatConverter*   conv = NULL;
+    IWICBitmapSource*      src = NULL;
+    BYTE* buf = NULL;
+    UINT  bw = 0, bh = 0, tw = 0, th = 0;
+    UINT  stride = 0, size = 0;
+    int   ok = 0;
+
+    *obits = NULL;
+
+    if (!OpenBestFrame(path, &fac, &dec, &frame, &bw, &bh, err, cap))
+        return 0;
+
+    if (TooBig(bw, bh)) {
+        SetTooBigErr(err, cap, bw, bh);
         goto done;
     }
 
@@ -384,8 +442,32 @@ static int SameFile(const WCHAR* a, const WCHAR* b) {
     return same;
 }
 
-int ImgImport(const WCHAR* srcPath, WCHAR* outName, size_t outCap) {
+int ImgImport(const WCHAR* srcPath, WCHAR* outName, size_t outCap,
+              WCHAR* err, size_t errCap) {
+    if (err && errCap) err[0] = 0;
     if (!srcPath || !outName || outCap == 0) return 0;
+
+    /* 先按文件大小挡一道：复制前就拒绝，别把大文件搬进 shapes\ */
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(srcPath, GetFileExInfoStandard, &fa)) {
+        SetErr(err, errCap, L"读不到文件信息（文件可能已被移动或删除）");
+        return 0;
+    }
+    ULONGLONG bytes = ((ULONGLONG)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+    if (bytes > IMG_MAX_FILE_BYTES) {
+        SetErr(err, errCap, L"图片文件太大（%.1f MB；上限 %u MB）",
+               (double)bytes / (1024.0 * 1024.0),
+               IMG_MAX_FILE_BYTES / (1024u * 1024u));
+        return 0;
+    }
+
+    /* 再按像素尺寸挡一道：高压缩比的小文件也可能解出巨图 */
+    UINT w = 0, h = 0;
+    if (!Probe(srcPath, &w, &h, err, errCap)) return 0;
+    if (TooBig(w, h)) {
+        SetTooBigErr(err, errCap, w, h);
+        return 0;
+    }
 
     WCHAR dir[MAX_PATH];
     ShapesDir(dir, sizeof(dir) / sizeof(dir[0]));
@@ -394,11 +476,17 @@ int ImgImport(const WCHAR* srcPath, WCHAR* outName, size_t outCap) {
     const WCHAR* base = srcPath;
     for (const WCHAR* p = srcPath; *p; p++)
         if (*p == L'\\' || *p == L'/') base = p + 1;
-    if (!base[0]) return 0;
+    if (!base[0]) {
+        SetErr(err, errCap, L"文件名无效");
+        return 0;
+    }
 
     WCHAR stem[CFG_NAME_MAX], ext[32];
     SplitName(base, stem, CFG_NAME_MAX, ext, 32);
-    if (!stem[0]) return 0;
+    if (!stem[0]) {
+        SetErr(err, errCap, L"文件名无效");
+        return 0;
+    }
 
     for (int n = 1; n < 1000; n++) {
         WCHAR cand[CFG_NAME_MAX];
@@ -411,7 +499,11 @@ int ImgImport(const WCHAR* srcPath, WCHAR* outName, size_t outCap) {
         _snwprintf_s(dst, MAX_PATH, _TRUNCATE, L"%s\\%s", dir, cand);
 
         if (GetFileAttributesW(dst) == INVALID_FILE_ATTRIBUTES) {
-            if (!CopyFileW(srcPath, dst, FALSE)) return 0;
+            if (!CopyFileW(srcPath, dst, FALSE)) {
+                SetErr(err, errCap,
+                       L"无法把图片复制到 shapes 目录（请确认程序所在目录可写）");
+                return 0;
+            }
             lstrcpynW(outName, cand, (int)outCap);
             return 1;
         }
@@ -420,6 +512,7 @@ int ImgImport(const WCHAR* srcPath, WCHAR* outName, size_t outCap) {
             return 1;
         }
     }
+    SetErr(err, errCap, L"shapes 目录里同名文件太多");
     return 0;
 }
 

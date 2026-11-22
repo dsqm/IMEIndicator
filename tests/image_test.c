@@ -7,6 +7,7 @@
 #include "../src/ime_indicator.h"
 #include <wincodec.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
@@ -105,9 +106,9 @@ int main(void) {
     /* ---------- 1. 导入 ---------- */
     wprintf(L"[1] 导入与去重\n");
     WCHAR name[CFG_NAME_MAX], name2[CFG_NAME_MAX];
-    CHECK(ImgImport(srcPath, name, CFG_NAME_MAX), L"首次导入成功");
+    CHECK(ImgImport(srcPath, name, CFG_NAME_MAX, NULL, 0), L"首次导入成功");
     CHECK(wcscmp(name, L"redblue.png") == 0, L"首次导入保留原文件名");
-    CHECK(ImgImport(srcPath, name2, CFG_NAME_MAX), L"重复导入成功");
+    CHECK(ImgImport(srcPath, name2, CFG_NAME_MAX, NULL, 0), L"重复导入成功");
     CHECK(wcscmp(name2, name) == 0, L"内容相同不产生副本");
 
     /* 同名不同内容 -> 加序号 */
@@ -117,7 +118,7 @@ int main(void) {
     _snwprintf_s(altPath, MAX_PATH, _TRUNCATE, L"%s\\redblue.png", alt);
     CHECK(WritePng(altPath, 2, 2, altPx), L"同名测试 PNG 写入成功");
     WCHAR name3[CFG_NAME_MAX];
-    CHECK(ImgImport(altPath, name3, CFG_NAME_MAX), L"同名不同内容导入成功");
+    CHECK(ImgImport(altPath, name3, CFG_NAME_MAX, NULL, 0), L"同名不同内容导入成功");
     CHECK(wcscmp(name3, L"redblue_2.png") == 0, L"重名自动加序号");
 
     /* ---------- 2. 解码与等比缩放 ---------- */
@@ -169,6 +170,55 @@ int main(void) {
     ImgBlit(dst, &v, 128);
     CHECK(dst[0] == 0 && dst[1] == 0 && dst[2] == 128 && dst[3] == 128,
           L"alpha=128 时预乘通道减半");
+
+    /* ---------- 5. 导入上限 ---------- */
+    wprintf(L"[5] 导入上限\n");
+
+    /* 超过文件大小上限：先按大小拒绝，不必是有效图片 */
+    WCHAR bigPath[MAX_PATH], bigShapes[MAX_PATH];
+    _snwprintf_s(bigPath, MAX_PATH, _TRUNCATE, L"%s\\big.png", dir);
+    _snwprintf_s(bigShapes, MAX_PATH, _TRUNCATE, L"%s\\big.png", shapes);
+    DeleteFileW(bigShapes);
+    HANDLE hb = CreateFileW(bigPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(hb != INVALID_HANDLE_VALUE, L"创建超限文件");
+    if (hb != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER sz;
+        sz.QuadPart = (LONGLONG)IMG_MAX_FILE_BYTES + 1;
+        CHECK(SetFilePointerEx(hb, sz, NULL, FILE_BEGIN) && SetEndOfFile(hb),
+              L"扩展到超限大小");
+        CloseHandle(hb);
+    }
+    WCHAR bigName[CFG_NAME_MAX], bigErr[256];
+    CHECK(!ImgImport(bigPath, bigName, CFG_NAME_MAX, bigErr, 256),
+          L"超过文件大小上限被拒绝");
+    CHECK(bigErr[0] != 0, L"文件超限时给出原因");
+    CHECK(GetFileAttributesW(bigShapes) == INVALID_FILE_ATTRIBUTES,
+          L"超限文件没有被复制进 shapes");
+
+    /* 超过单边上限：文件很小，但尺寸超限 */
+    WCHAR widePath[MAX_PATH], wideShapes[MAX_PATH];
+    _snwprintf_s(widePath, MAX_PATH, _TRUNCATE, L"%s\\wide.png", dir);
+    _snwprintf_s(wideShapes, MAX_PATH, _TRUNCATE, L"%s\\wide.png", shapes);
+    DeleteFileW(wideShapes);
+    int wideW = (int)IMG_MAX_EDGE + 1;
+    BYTE* widePx = (BYTE*)malloc((size_t)wideW * 4);
+    CHECK(widePx != NULL, L"分配超宽测试像素");
+    if (widePx) {
+        Fill(widePx, wideW, 1, 0, 0, 255, 255);
+        CHECK(WritePng(widePath, wideW, 1, widePx), L"超宽测试 PNG 写入成功");
+        WCHAR wideName[CFG_NAME_MAX], wideErr[256];
+        CHECK(!ImgImport(widePath, wideName, CFG_NAME_MAX, wideErr, 256),
+              L"超过单边上限被拒绝");
+        CHECK(wideErr[0] != 0, L"尺寸超限时给出原因");
+        CHECK(GetFileAttributesW(wideShapes) == INVALID_FILE_ATTRIBUTES,
+              L"超限图片没有被复制进 shapes");
+
+        /* 手动丢进 shapes\ 的超限文件：解码时同样拒绝 */
+        CHECK(WritePng(wideShapes, wideW, 1, widePx), L"超限 PNG 直接写入 shapes");
+        CHECK(!ImgGet(L"wide.png", 4, &v, err, 128), L"解码时拒绝超限图片");
+        free(widePx);
+    }
 
     ImgShutdown();
     if (SUCCEEDED(co)) CoUninitialize();

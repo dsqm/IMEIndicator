@@ -691,6 +691,11 @@ static void ScaleControls(void) {
 static HWND g_imgLabel[3];
 static int  g_imgBad[3];
 
+/* 「颜色」标签：形状=图片时图片不染色，颜色项整行置灰（STATIC 的
+   EnableWindow 不改字色，所以要在 WM_CTLCOLORSTATIC 里自己换） */
+static HWND g_colorLabel[3];
+static int  g_colorDim[3];
+
 /* 四个数值项的标签：跟随 cn_cn 时置灰（STATIC 的 EnableWindow 不改字色，
    所以要在 WM_CTLCOLORSTATIC 里自己换） */
 static HWND g_customLabel[3][4];
@@ -719,6 +724,13 @@ static LRESULT CALLBACK PanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         for (int i = 0; i < 3; i++) {
             if (ctl == g_imgLabel[i] && g_imgBad[i]) {
                 SetTextColor(dc, RGB(0xC0, 0x00, 0x00));
+                break;
+            }
+        }
+        /* 形状=图片时颜色项不生效：标签跟色块一起变灰 */
+        for (int i = 0; i < 3; i++) {
+            if (ctl == g_colorLabel[i] && g_colorDim[i]) {
+                SetTextColor(dc, RGB(0xA0, 0xA0, 0xA0));
                 break;
             }
         }
@@ -1318,6 +1330,10 @@ typedef struct {
 
 static Block g_blk[3];
 static ImeState g_blkState[3] = { (ImeState)-1, (ImeState)-1, (ImeState)-1 };
+
+/* 每个状态「上一次选择的非图片形状」：形状=图片但没选到可用图片时，
+   保存时回退到它，避免存下一个显示不出来的配置。 */
+static int g_lastShape[IMEST_COUNT];
 static HWND  g_layoutPanel = NULL;
 static HWND  g_globalPanel = NULL;
 static HWND  g_ignorePanel = NULL;
@@ -1338,6 +1354,7 @@ static void BuildStateBlock(int i, int y) {
     y += 24;
 
     b->lbl[0] = CLabel(L"颜色", lx, y + 4, 54, 20);
+    g_colorLabel[i] = b->lbl[0];
     b->color = CColorBtn(lx + 58, y, 60, 22, i);
     b->lbl[1] = CLabel(L"形状", rx, y + 4, 54, 20);
     b->shape = CCombo(rx + 58, y, 110, 180, i, F_SHAPE);
@@ -1508,6 +1525,14 @@ static void FillBlock(int i, ImeState s) {
         if (m->label) EnableWindow(m->label, inherited ? FALSE : TRUE);
     }
 
+    /* 形状=图片：图片原样使用、不染色，颜色项整行置灰（跟随中已整块置灰） */
+    int colorOn = !inherited && eff.shape != SHAPE_IMAGE;
+    EnableWindow(b->color, colorOn ? TRUE : FALSE);
+    if (b->lbl[0]) EnableWindow(b->lbl[0], colorOn ? TRUE : FALSE);
+    g_colorDim[i] = colorOn ? 0 : 1;
+    if (b->lbl[0]) InvalidateRect(b->lbl[0], NULL, FALSE);
+    InvalidateRect(b->color, NULL, TRUE);
+
     /* 行首勾选框：不勾 = 跟随 cn_cn（滑块/数值/重置置灰，标签也变灰）。
        整块跟随基础状态时轮不到它，cn_cn 自己更是来源 —— 都藏掉。 */
     int customizable = (s != IMEST_CN_CN) && !inherited;
@@ -1531,6 +1556,37 @@ static void FillBlock(int i, ImeState s) {
         g_customDim[i][k] = custom ? 0 : 1;
         if (b->lbl[2 + k]) InvalidateRect(b->lbl[2 + k], NULL, FALSE);
     }
+}
+
+/* 从当前配置同步「上一次选择的形状」：图片本身不算，回落到圆 */
+static void SyncLastShapes(void) {
+    for (int i = 0; i < IMEST_COUNT; i++) {
+        StateStyle eff;
+        CfgStateStyle(&s_cfg, (ImeState)i, &eff);
+        g_lastShape[i] = (eff.shape == SHAPE_IMAGE) ? SHAPE_CIRCLE : eff.shape;
+    }
+}
+
+/* 形状=图片但没选到可用图片（没选 / 文件缺失 / 解码失败）时，回退到
+   上一次选择的形状。保存前调用：存下一个显示不出来的配置没有意义。
+   返回 1 表示有状态被改。 */
+static int FallbackBadImages(void) {
+    int changed = 0;
+    for (int i = 0; i < IMEST_COUNT; i++) {
+        StateStyle* raw = &s_cfg.st[i];
+        if (raw->inherit >= 0) continue;      /* 跟随基础状态：由基础状态兜底 */
+        StateStyle eff;
+        CfgStateStyle(&s_cfg, (ImeState)i, &eff);
+        if (eff.shape != SHAPE_IMAGE) continue;
+        ImgView iv;
+        if (eff.image[0] && ImgGet(eff.image, 64, &iv, NULL, 0)) continue;
+        int back = g_lastShape[i];
+        if (back == SHAPE_IMAGE) back = SHAPE_CIRCLE;
+        raw->shape = back;
+        raw->have |= SF_SHAPE;
+        changed = 1;
+    }
+    return changed;
 }
 
 /* ---------- 全局面板 ---------- */
@@ -1641,6 +1697,7 @@ static void FillIgnorePanel(void) {
    下拉沿用自绘的 SEL_CLASS，挂在预览条自己身上 —— 几何跟着预览走，缩放时
    不用主窗口再摆一次。 */
 static void InvalidatePreview(void);
+static void ShowPage(int page);
 static int PreviewStates(ImeState* out, int cap) {
     int n = 0;
     for (int p = 0; p < 5; p++) {
@@ -1898,10 +1955,12 @@ static void CommitForm(void) {
             }
             if (inherited) continue;
             int sel = (int)SendMessageW(b->shape, CB_GETCURSEL, 0, 0);
-            raw->shape = (sel == 0) ? SHAPE_NONE :
-                         (sel == 2) ? SHAPE_TRIANGLE :
-                         (sel == 3) ? SHAPE_IMAGE : SHAPE_CIRCLE;
+            int shape = (sel == 0) ? SHAPE_NONE :
+                        (sel == 2) ? SHAPE_TRIANGLE :
+                        (sel == 3) ? SHAPE_IMAGE : SHAPE_CIRCLE;
+            raw->shape = shape;
             raw->have |= SF_SHAPE;
+            if (shape != SHAPE_IMAGE) g_lastShape[s] = shape;
             /* 跟随 cn_cn 的项不能写回：写回去就变成显式值，之后改 cn_cn 不跟了 */
             if (!CfgFieldFollowsCn(&s_cfg, s, SF_SIZE)) {
                 raw->size = SliderPos(b->slSize);       raw->have |= SF_SIZE;
@@ -1996,6 +2055,11 @@ static void SaveSettingsWidth(int w) {
 /* ---------- 保存 / 重启 ---------- */
 static void DoSave(int restart) {
     CommitForm();
+    /* 形状=图片但没选到可用图片：回退到上一次选择的形状再存 */
+    if (FallbackBadImages()) {
+        if (g_page < 5) ShowPage(g_page);
+        InvalidatePreview();
+    }
     if (!CfgSave(&s_cfg)) {
         MessageBoxW(g_hwnd, L"写入 IMEIndicator.json 失败。\n\n"
                             L"请确认程序所在目录可写（放在 Program Files 下时需要管理员权限）。",
@@ -2163,6 +2227,10 @@ static void PickImage(int block) {
 
     WCHAR file[MAX_PATH];
     file[0] = 0;
+    WCHAR title[128];
+    _snwprintf_s(title, 128, _TRUNCATE,
+                 L"选择图片（文件 ≤ %u MB，长边 ≤ %u 像素）",
+                 IMG_MAX_FILE_BYTES / (1024u * 1024u), IMG_MAX_EDGE);
     OPENFILENAMEW ofn;
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
@@ -2170,13 +2238,14 @@ static void PickImage(int block) {
     ofn.lpstrFilter = L"图片 (*.png;*.ico;*.bmp;*.jpg)\0*.png;*.ico;*.bmp;*.jpg\0所有文件\0*.*\0";
     ofn.lpstrFile = file;
     ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = title;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&ofn)) return;
 
     WCHAR name[CFG_NAME_MAX];
-    if (!ImgImport(file, name, CFG_NAME_MAX)) {
-        MessageBoxW(g_hwnd, L"无法把图片复制到 shapes 目录。\n\n"
-                            L"请确认程序所在目录可写。",
+    WCHAR err[256];
+    if (!ImgImport(file, name, CFG_NAME_MAX, err, 256)) {
+        MessageBoxW(g_hwnd, err[0] ? err : L"导入图片失败。",
                     L"导入图片失败", MB_ICONERROR | MB_OK);
         return;
     }
@@ -2204,6 +2273,7 @@ static void ResetAll(void) {
     int keepW = MulDiv(cr.right, 96, g_dpi > 0 ? g_dpi : 96);
     CfgDefaults(&s_cfg);
     s_cfg.settingsWidth = keepW;
+    SyncLastShapes();
     ShowPage(g_page);        /* 重填当前页（含预览） */
     RefreshDirty();
 }
@@ -2338,10 +2408,12 @@ static void OnCommand(int id, HWND ctl) {
         ImeState s = g_blkState[m->block];
         if ((int)s < 0) return;
         int sel = (int)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
-        s_cfg.st[s].shape = (sel == 0) ? SHAPE_NONE :
-                            (sel == 2) ? SHAPE_TRIANGLE :
-                            (sel == 3) ? SHAPE_IMAGE : SHAPE_CIRCLE;
+        int shape = (sel == 0) ? SHAPE_NONE :
+                    (sel == 2) ? SHAPE_TRIANGLE :
+                    (sel == 3) ? SHAPE_IMAGE : SHAPE_CIRCLE;
+        s_cfg.st[s].shape = shape;
         s_cfg.st[s].have |= SF_SHAPE;
+        if (shape != SHAPE_IMAGE) g_lastShape[s] = shape;
         g_dirty = 1;
         /* 切到/切离「图片」要同步文件名标签的显隐与标红 */
         FillBlock(m->block, s);
@@ -2704,8 +2776,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         FillRect(di->hDC, &di->rcItem, bg);
         DeleteObject(bg);
 
-        PaintRoundRectAA(di->hDC, &di->rcItem, S(3), RGB(0xAD, 0xAD, 0xAD),
-                         RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF));
+        COLORREF fill = RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+        COLORREF border = RGB(0xAD, 0xAD, 0xAD);
+        if (di->itemState & ODS_DISABLED) {
+            /* 置灰：往白色方向混 75%，仍能看出原来的颜色 */
+            fill = RGB((GetRValue(fill) + 255 * 3) / 4,
+                       (GetGValue(fill) + 255 * 3) / 4,
+                       (GetBValue(fill) + 255 * 3) / 4);
+            border = RGB(0xD0, 0xD0, 0xD0);
+        }
+        PaintRoundRectAA(di->hDC, &di->rcItem, S(3), border, fill);
         return TRUE;
     }
 
@@ -2805,6 +2885,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show) {
 
     CfgLoad(&s_cfg);
     g_base = s_cfg;      /* 脏标记的基线 */
+    SyncLastShapes();
 
     RegisterPanelClass(hInst);
 
