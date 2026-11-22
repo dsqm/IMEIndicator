@@ -13,6 +13,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # exe 内嵌版本号取系统本地时间（build.bat 用 Get-Date），
+      # 先把时区设为中国标准时间，和 release/nightly 的构建日期保持一致。
+      - name: Set timezone to China Standard Time
+        shell: powershell
+        run: Set-TimeZone -Id "China Standard Time"
+
       - name: Build
         shell: cmd
         run: call build.bat

@@ -93,6 +93,8 @@ jobs:
           fi
 
           if gh release view nightly -R "$repo" >/dev/null 2>&1; then
+            # 旧版 nightly 上传的是裸 exe 资产，新版只发 zip；不删的话旧 exe 会永远留在 release 上
+            gh release delete-asset nightly IMEIndicator.exe -R "$repo" --yes 2>/dev/null || true
             gh release upload nightly IMEIndicator.zip -R "$repo" --clobber
             gh release edit nightly -R "$repo" --notes-file notes.md
           else
