@@ -63,7 +63,6 @@ static WCHAR* ParseString(Jp* j) {
     if (j->p >= j->end || *j->p != '"') return NULL;
     j->p++;
     /* 先量出 UTF-8 字节数（处理转义），再一次性转换 */
-    const char* start = j->p;
     size_t cap = 64, n = 0;
     char* buf = (char*)malloc(cap);
     if (!buf) return NULL;
@@ -153,7 +152,6 @@ static WCHAR* ParseString(Jp* j) {
     }
     if (j->p >= j->end) { free(buf); return NULL; }   /* 没闭合 */
     j->p++;   /* 跳过收尾引号 */
-    (void)start;
 
     int wl = MultiByteToWideChar(CP_UTF8, 0, buf, (int)n, NULL, 0);
     WCHAR* out = (WCHAR*)malloc(((size_t)wl + 1) * sizeof(WCHAR));
@@ -222,9 +220,11 @@ static Jv* ParseValue(Jp* j) {
         v->s = s;
         return v;
     }
-    if (!strncmp(j->p, "true", 4))  { j->p += 4; Jv* v = NewJv(JV_BOOL); if (v) v->b = 1; return v; }
-    if (!strncmp(j->p, "false", 5)) { j->p += 5; Jv* v = NewJv(JV_BOOL); if (v) v->b = 0; return v; }
-    if (!strncmp(j->p, "null", 4))  { j->p += 4; return NewJv(JV_NULL); }
+    /* 按 len 契约比较：token 可能正好在缓冲区末尾，先确认剩余长度再读，
+       否则 strncmp 会越过 end 读 4/5 字节 */
+    if ((size_t)(j->end - j->p) >= 4 && !strncmp(j->p, "true", 4))  { j->p += 4; Jv* v = NewJv(JV_BOOL); if (v) v->b = 1; return v; }
+    if ((size_t)(j->end - j->p) >= 5 && !strncmp(j->p, "false", 5)) { j->p += 5; Jv* v = NewJv(JV_BOOL); if (v) v->b = 0; return v; }
+    if ((size_t)(j->end - j->p) >= 4 && !strncmp(j->p, "null", 4))  { j->p += 4; return NewJv(JV_NULL); }
     /* 数字 */
     const char* s = j->p;
     if (*j->p == '-' || *j->p == '+') j->p++;
@@ -264,8 +264,9 @@ Jv* JsonParse(const char* utf8, int len) {
 
 Jv* JsonGet(const Jv* obj, const WCHAR* key) {
     if (!obj || obj->type != JV_OBJ || !key) return NULL;
+    /* JSON 键名大小写敏感，不能用 _wcsicmp */
     for (int i = 0; i < obj->count; i++)
-        if (obj->keys[i] && _wcsicmp(obj->keys[i], key) == 0) return obj->items[i];
+        if (obj->keys[i] && wcscmp(obj->keys[i], key) == 0) return obj->items[i];
     return NULL;
 }
 

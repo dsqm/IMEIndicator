@@ -16,83 +16,47 @@ if errorlevel 1 (
 if not exist "obj\test" mkdir "obj\test"
 
 rem ---- config layer: JSON round-trip, defaults, inherit, migration, blacklist ----
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Foobj\test\ ^
-   tests\config_test.c src\config.c src\json.c ^
-   /link /OUT:obj\test\config_test.exe ^
-   user32.lib shell32.lib advapi32.lib ^
-   /SUBSYSTEM:CONSOLE
-if errorlevel 1 (
-    echo [ERROR] config_test build failed
-    popd
-    exit /b 1
-)
-
-obj\test\config_test.exe
-if errorlevel 1 (
-    echo [ERROR] config tests failed
-    popd
-    exit /b 1
-)
+rem config.c calls DbgLog on the ini-migration failure path -> link debug.c too (else LNK2019)
+call :run_test config_test "tests\config_test.c src\config.c src\json.c src\debug.c" "user32.lib shell32.lib advapi32.lib"
+if errorlevel 1 goto :fail
 
 rem ---- shape rasterizer: area, antialiasing, premultiplied alpha ----
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Foobj\test\ ^
-   tests\shape_test.c src\shape.c ^
-   /link /OUT:obj\test\shape_test.exe ^
-   /SUBSYSTEM:CONSOLE
-if errorlevel 1 (
-    echo [ERROR] shape_test build failed
-    popd
-    exit /b 1
-)
-
-obj\test\shape_test.exe
-if errorlevel 1 (
-    echo [ERROR] shape tests failed
-    popd
-    exit /b 1
-)
+call :run_test shape_test "tests\shape_test.c src\shape.c" ""
+if errorlevel 1 goto :fail
 
 rem ---- settings UI painting: coverage AA, premultiplied layer, AlphaBlend ----
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Foobj\test\ ^
-   tests\uipaint_test.c src\uipaint.c ^
-   /link /OUT:obj\test\uipaint_test.exe ^
-   user32.lib gdi32.lib msimg32.lib ^
-   /SUBSYSTEM:CONSOLE
-if errorlevel 1 (
-    echo [ERROR] uipaint_test build failed
-    popd
-    exit /b 1
-)
-
-obj\test\uipaint_test.exe
-if errorlevel 1 (
-    echo [ERROR] uipaint tests failed
-    popd
-    exit /b 1
-)
+call :run_test uipaint_test "tests\uipaint_test.c src\uipaint.c" "user32.lib gdi32.lib msimg32.lib"
+if errorlevel 1 goto :fail
 
 rem ---- image shapes: WIC decode, aspect scaling, import dedup ----
-cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Foobj\test\ ^
-   tests\image_test.c src\image.c src\config.c src\json.c ^
-   /link /OUT:obj\test\image_test.exe ^
-   user32.lib shell32.lib advapi32.lib ole32.lib windowscodecs.lib ^
-   /SUBSYSTEM:CONSOLE
-if errorlevel 1 (
-    echo [ERROR] image_test build failed
-    popd
-    exit /b 1
-)
-
-obj\test\image_test.exe
-if errorlevel 1 (
-    echo [ERROR] image tests failed
-    popd
-    exit /b 1
-)
+rem links config.c as well -> needs debug.c for DbgLog
+call :run_test image_test "tests\image_test.c src\image.c src\config.c src\json.c src\debug.c" "user32.lib shell32.lib advapi32.lib ole32.lib windowscodecs.lib"
+if errorlevel 1 goto :fail
 
 echo [OK] all tests passed
 popd
+exit /b 0
+
+:fail
+popd
+exit /b 1
+
+rem ---- build + run one test exe ----
+rem %1 = test name (exe base), %2 = source list, %3 = lib list (may be empty)
+:run_test
+cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
+   /Foobj\test\ ^
+   %~2 ^
+   /link /OUT:obj\test\%~1.exe %~3 ^
+   /SUBSYSTEM:CONSOLE
+if errorlevel 1 (
+    echo [ERROR] %~1 build failed
+    exit /b 1
+)
+
+obj\test\%~1.exe
+if errorlevel 1 (
+    echo [ERROR] %~1 tests failed
+    exit /b 1
+)
+exit /b 0

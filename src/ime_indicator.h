@@ -70,7 +70,6 @@ typedef enum {
 
 #define CFG_MAX_IGNORE 128
 #define CFG_NAME_MAX    64
-#define CFG_PATH_MAX    260
 
 /* 一个状态的样式。尺寸/偏移都是**逻辑像素**（96 DPI 基准），
    渲染时按光标所在显示器的 DPI 换算成物理像素。 */
@@ -116,6 +115,8 @@ void   CfgLoad(ImeCfg* c);              /* 读 IMEIndicator.json；缺则迁移 
 int    CfgSave(const ImeCfg* c);        /* 写回 JSON；成功返回 1 */
 void   CfgPath(WCHAR* out, size_t cap); /* 配置文件完整路径 */
 void   CfgDir(WCHAR* out, size_t cap);  /* exe 所在目录（不带尾反斜杠） */
+void   CfgIniPath(WCHAR* out, size_t cap); /* 旧版 ini 完整路径（迁移用） */
+UINT   CfgSystemDpi(void);              /* 系统 DPI（取不到回 96） */
 void   CfgDefaults(ImeCfg* c);          /* 填出厂默认值 */
 /* 把状态 s 的样式解析成最终值（继承链 + defaults），结果写进 out。
    带环保护：inherit 指回自己/成环时按"不继承"处理。 */

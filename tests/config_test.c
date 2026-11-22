@@ -9,6 +9,7 @@
  *   6. 黑名单匹配（大小写、.exe 后缀可选）
  *   7. 加载后未设字段按求值结果补齐（打开设置不该一上来就是"有改动"）
  *   8. 尺寸/偏移/透明度默认跟随中文输入法(cn_cn)，「自定义」后不再跟
+ *   9. 旧 ini 的 AutoHideStates 位掩码展开（Caps/KbdEn 一位映射多状态）
  *
  * 用 exe 同目录的临时文件跑，不碰真实配置 —— 测试可反复执行。
  */
@@ -55,6 +56,14 @@ static void TestRoundTrip(void) {
     a.def.offsetY = 9;
     a.def.alpha = 200;
     a.def.shape = SHAPE_TRIANGLE;
+    /* defaults 段的 enabled/color/image 也要能往返：CfgSave 曾经只写
+       size/offset/alpha/shape，读进来的这三项保存即丢 */
+    a.def.enabled = 0;
+    a.def.have |= SF_ENABLED;
+    a.def.rgb = 0x445566;
+    a.def.have |= SF_COLOR;
+    wcscpy_s(a.def.image, CFG_NAME_MAX, L"dot.png");
+    a.def.have |= SF_IMAGE;
 
     a.st[IMEST_CN_EN].rgb = 0x123456;
     a.st[IMEST_CN_EN].have |= SF_COLOR;
@@ -113,6 +122,9 @@ static void TestRoundTrip(void) {
     CHECK_INT(b.def.offsetX, -7, L"def.offsetX 往返");
     CHECK_INT(b.def.alpha, 200, L"def.alpha 往返");
     CHECK_INT(b.def.shape, SHAPE_TRIANGLE, L"def.shape 往返");
+    CHECK_INT(b.def.enabled, 0, L"def.enabled 往返");
+    CHECK(b.def.rgb == 0x445566, L"def.color 往返");
+    CHECK(wcscmp(b.def.image, L"dot.png") == 0, L"def.image 往返");
     CHECK(b.st[IMEST_CN_EN].rgb == 0x123456, L"状态颜色往返");
     CHECK_INT(b.st[IMEST_CN_EN].size, 44, L"状态尺寸往返");
     CHECK_INT(b.st[IMEST_CN_EN].shape, SHAPE_NONE, L"状态形状往返");
@@ -196,7 +208,7 @@ static void TestCycle(void) {
     c.st[IMEST_US_CAPS].rgb = 0xFF00FF; c.st[IMEST_US_CAPS].have = SF_COLOR;
     StateStyle s;
     CfgStateStyle(&c, IMEST_US, &s);     /* 不应死循环 */
-    CHECK(1, L"成环不死循环");
+    CHECK(s.size >= 1 && s.size <= 256, L"成环时样式仍合法");
     CHECK(s.rgb == 0x0000FF || s.rgb == 0xFF00FF, L"成环时取到链上某个值");
 }
 
@@ -344,10 +356,9 @@ static void TestFollowCn(void) {
  * defaults 与各状态的求值结果里，不能被 CfgDefaults 物化的内置值盖住。 */
 static void TestMigrateOldIni(void) {
     wprintf(L"[9] 旧 ini 迁移\n");
-    WCHAR dir[MAX_PATH], json[MAX_PATH], ini[MAX_PATH], bak[MAX_PATH];
-    CfgDir(dir, MAX_PATH);
+    WCHAR json[MAX_PATH], ini[MAX_PATH], bak[MAX_PATH];
     CfgPath(json, MAX_PATH);
-    _snwprintf_s(ini, MAX_PATH, _TRUNCATE, L"%s\\IMEIndicator.ini", dir);
+    CfgIniPath(ini, MAX_PATH);
     _snwprintf_s(bak, MAX_PATH, _TRUNCATE, L"%s.bak", ini);
     DeleteFileW(json);
     DeleteFileW(bak);
@@ -370,10 +381,7 @@ static void TestMigrateOldIni(void) {
     if (f) { fwrite(text, 1, strlen(text), f); fclose(f); }
 
     /* 旧版是物理像素，迁移按系统 DPI 折算成逻辑像素 */
-    HDC dc = GetDC(NULL);
-    UINT dpi = dc ? (UINT)GetDeviceCaps(dc, LOGPIXELSY) : 96;
-    if (dc) ReleaseDC(NULL, dc);
-    if (dpi == 0) dpi = 96;
+    UINT dpi = CfgSystemDpi();
     int expSize = CfgOldPxToLogical(30, dpi);
     int expOffX = CfgOldPxToLogical(5, dpi);
     int expOffY = CfgOldPxToLogical(-3, dpi);
@@ -410,6 +418,43 @@ static void TestMigrateOldIni(void) {
     DeleteFileW(json);
 }
 
+/* ---------- 10. 旧 ini 的 AutoHideStates 位掩码展开 ---------- */
+/* 旧 Caps 是盖掉一切的单一状态，旧 KbdEn 同时代表"其他布局"：迁移时一个位
+ * 要展开到多个新状态，否则 cn_caps/jp_caps/kr_caps/other_caps 会漏掉。 */
+static void TestMigrateAutoHideStates(void) {
+    wprintf(L"[10] 旧 ini AutoHideStates 位掩码展开\n");
+    WCHAR json[MAX_PATH], ini[MAX_PATH], bak[MAX_PATH];
+    CfgPath(json, MAX_PATH);
+    CfgIniPath(ini, MAX_PATH);
+    _snwprintf_s(bak, MAX_PATH, _TRUNCATE, L"%s.bak", ini);
+    DeleteFileW(json);
+    DeleteFileW(bak);
+
+    const char* text =
+        "[General]\n"
+        "AutoHideStates = Caps,KbdEn\n";
+    FILE* f = NULL;
+    CHECK(_wfopen_s(&f, ini, L"wb") == 0 && f != NULL, L"写入旧 ini（AutoHideStates）");
+    if (f) { fwrite(text, 1, strlen(text), f); fclose(f); }
+
+    ImeCfg c;
+    CfgLoad(&c);
+    /* Caps 位覆盖全部五个 *_caps */
+    CHECK_INT(c.st[IMEST_US_CAPS].transient, 1, L"us_caps 临时显示");
+    CHECK_INT(c.st[IMEST_CN_CAPS].transient, 1, L"cn_caps 临时显示");
+    CHECK_INT(c.st[IMEST_JP_CAPS].transient, 1, L"jp_caps 临时显示");
+    CHECK_INT(c.st[IMEST_KR_CAPS].transient, 1, L"kr_caps 临时显示");
+    CHECK_INT(c.st[IMEST_OTHER_CAPS].transient, 1, L"other_caps 临时显示");
+    /* KbdEn 位同时覆盖 us 与 other */
+    CHECK_INT(c.st[IMEST_US].transient, 1, L"us 临时显示");
+    CHECK_INT(c.st[IMEST_OTHER].transient, 1, L"other 临时显示");
+    /* 没在掩码里的状态不受影响（jp 默认常显） */
+    CHECK_INT(c.st[IMEST_JP].transient, 0, L"未在掩码里的状态不受影响");
+
+    DeleteFileW(bak);
+    DeleteFileW(json);
+}
+
 int wmain(void) {
     /* 控制台按 UTF-8 输出：重定向到文件时也是 UTF-8，CI 日志里中文不乱码 */
     SetConsoleOutputCP(CP_UTF8);
@@ -427,6 +472,7 @@ int wmain(void) {
     TestMaterialize();
     TestFollowCn();
     TestMigrateOldIni();
+    TestMigrateAutoHideStates();
 
     wprintf(L"\n%d passed, %d failed\n", g_pass, g_fail);
     if (g_fail) { wprintf(L"=== FAILED ===\n"); return 1; }

@@ -132,8 +132,18 @@ int CfgImageNameValid(const WCHAR* name) {
 void CfgDir(WCHAR* out, size_t cap) {
     WCHAR exe[MAX_PATH];
     DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    /* n==0：取不到 exe 路径，exe 内容未定义；n>=MAX_PATH：路径被截断且没有
+       终止符。两种都不能直接交给 _snwprintf_s 的 %s，先兜底/强制补终止符。 */
+    if (n == 0) {
+        lstrcpynW(exe, L".", MAX_PATH);
+        n = 1;
+    } else if (n >= MAX_PATH) {
+        exe[MAX_PATH - 1] = 0;
+        n = MAX_PATH - 1;
+    }
     WCHAR* slash = NULL;
-    for (DWORD i = 0; i < n; i++) if (exe[i] == L'\\') slash = &exe[i];
+    /* 循环同时判 exe[i] 非 0：n 只是写入长度，异常时不能当终止符用 */
+    for (DWORD i = 0; i < n && exe[i]; i++) if (exe[i] == L'\\') slash = &exe[i];
     if (slash) *slash = 0;
     _snwprintf_s(out, cap, _TRUNCATE, L"%s", exe);
 }
@@ -144,7 +154,8 @@ void CfgPath(WCHAR* out, size_t cap) {
     _snwprintf_s(out, cap, _TRUNCATE, L"%s\\IMEIndicator.json", dir);
 }
 
-static void IniPath(WCHAR* out, size_t cap) {
+/* 旧版 ini 路径。暴露给测试用，避免测试自己重写一份路径拼接逻辑。 */
+void CfgIniPath(WCHAR* out, size_t cap) {
     WCHAR dir[MAX_PATH];
     CfgDir(dir, MAX_PATH);
     _snwprintf_s(out, cap, _TRUNCATE, L"%s\\IMEIndicator.ini", dir);
@@ -318,7 +329,7 @@ static int HexV(WCHAR c) {
     return -1;
 }
 
-/* "#RRGGBB" -> 0x00RRGGBB。失败返回 -1。 */
+/* "#RRGGBB" -> 0x00RRGGBB。成功返回 1，失败返回 0。 */
 static int ParseColor(const WCHAR* v, DWORD* out) {
     if (!v) return 0;
     while (*v == L' ' || *v == L'\t') v++;
@@ -586,12 +597,13 @@ static int ReadOldIni(const WCHAR* path, OldIni* o) {
                     else if (_wcsicmp(k, L"wpscom") == 0)              o->wpsCom = OldParseInt(v, 1, 0, 1);
                 } else if (sec == 1) {
                     DWORD tmp;
-                    if      (_wcsicmp(k, L"en") == 0)    { int r = OldParseColor(v, o->en, &tmp);   o->en = tmp;   if (r < 0) o->have |= 1; }
-                    else if (_wcsicmp(k, L"caps") == 0)  { int r = OldParseColor(v, o->caps, &tmp); o->caps = tmp; if (r < 0) o->have |= 2; }
-                    else if (_wcsicmp(k, L"kbden") == 0) { int r = OldParseColor(v, o->kbden, &tmp); o->kbden = tmp; if (r < 0) o->have |= 4; }
-                    else if (_wcsicmp(k, L"cn") == 0)    { int r = OldParseColor(v, o->cn, &tmp);   o->cn = tmp;   if (r < 0) o->have |= 8; }
-                    else if (_wcsicmp(k, L"jp") == 0)    { int r = OldParseColor(v, o->jp, &tmp);   o->jp = tmp;   if (r < 0) o->have |= 16; }
-                    else if (_wcsicmp(k, L"kr") == 0)    { int r = OldParseColor(v, o->kr, &tmp);   o->kr = tmp;   if (r < 0) o->have |= 32; }
+                    /* 用 OLD_* 宏而不是裸数字：位含义只在一处定义，改位序不会漏改 */
+                    if      (_wcsicmp(k, L"en") == 0)    { int r = OldParseColor(v, o->en, &tmp);   o->en = tmp;   if (r < 0) o->have |= OLD_EN; }
+                    else if (_wcsicmp(k, L"caps") == 0)  { int r = OldParseColor(v, o->caps, &tmp); o->caps = tmp; if (r < 0) o->have |= OLD_CAPS; }
+                    else if (_wcsicmp(k, L"kbden") == 0) { int r = OldParseColor(v, o->kbden, &tmp); o->kbden = tmp; if (r < 0) o->have |= OLD_KBDEN; }
+                    else if (_wcsicmp(k, L"cn") == 0)    { int r = OldParseColor(v, o->cn, &tmp);   o->cn = tmp;   if (r < 0) o->have |= OLD_CN; }
+                    else if (_wcsicmp(k, L"jp") == 0)    { int r = OldParseColor(v, o->jp, &tmp);   o->jp = tmp;   if (r < 0) o->have |= OLD_JP; }
+                    else if (_wcsicmp(k, L"kr") == 0)    { int r = OldParseColor(v, o->kr, &tmp);   o->kr = tmp;   if (r < 0) o->have |= OLD_KR; }
                     else if (_wcsicmp(k, L"alpha") == 0)   o->alpha = OldParseInt(v, 255, 0, 255);
                 } else if (sec == 2) {
                     if      (_wcsicmp(k, L"size") == 0)    o->size = OldParseInt(v, 9, 1, 64);
@@ -619,7 +631,8 @@ int CfgOldPxToLogical(int px, UINT dpi) {
     return MulDiv(px, 96, (int)dpi);
 }
 
-static UINT SystemDpi(void) {
+/* 系统 DPI。暴露给测试用：迁移测试要按同一 DPI 算期望值。 */
+UINT CfgSystemDpi(void) {
     HDC dc = GetDC(NULL);
     int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
     if (dc) ReleaseDC(NULL, dc);
@@ -637,7 +650,7 @@ static void MigrateFromOld(const OldIni* o, ImeCfg* c) {
     c->wpsCom = o->wpsCom;
     c->autoHideMs = o->autoHideMs;
 
-    UINT dpi = SystemDpi();
+    UINT dpi = CfgSystemDpi();
     int size = CfgOldPxToLogical(o->size, dpi);
     int offX = CfgOldPxToLogical(o->offX, dpi);
     int offY = CfgOldPxToLogical(o->offY, dpi);
@@ -690,12 +703,19 @@ static void MigrateFromOld(const OldIni* o, ImeCfg* c) {
         if (capsHidden) { c->st[s].enabled = 0; c->st[s].have |= SF_ENABLED; }
     }
 
-    /* 旧 AutoHideStates 位掩码 -> 各状态 transient */
+    /* 旧 AutoHideStates 位掩码 -> 各状态 transient。
+       旧 Caps 是"盖掉一切"的单一状态，所以一个 OLD_CAPS 位要覆盖全部五个
+       *_caps；旧 KbdEn 同时是"其他布局"的配色来源，也要映射到 other。 */
     if (o->ahHave) {
         struct { unsigned oldBit; ImeState st; } map[] = {
             { OLD_EN,    IMEST_CN_EN },
             { OLD_CAPS,  IMEST_US_CAPS },
+            { OLD_CAPS,  IMEST_CN_CAPS },
+            { OLD_CAPS,  IMEST_JP_CAPS },
+            { OLD_CAPS,  IMEST_KR_CAPS },
+            { OLD_CAPS,  IMEST_OTHER_CAPS },
             { OLD_KBDEN, IMEST_US },
+            { OLD_KBDEN, IMEST_OTHER },
             { OLD_CN,    IMEST_CN_CN },
             { OLD_JP,    IMEST_JP },
             { OLD_KR,    IMEST_KR },
@@ -732,8 +752,7 @@ static int ReadJsonFile(const WCHAR* path, ImeCfg* c) {
     free(raw);
     if (!root) return 0;
 
-    int ver = JsonInt(root, L"version", 0);
-    (void)ver;   /* 目前只有 v1；将来按版本分支 */
+    /* 目前只有 v1，不按版本分支；将来要兼容旧格式时在这里读 version 再分派 */
 
     const Jv* g = JsonGet(root, L"general");
     if (g && g->type == JV_OBJ) {
@@ -814,7 +833,24 @@ int CfgSave(const ImeCfg* c) {
     JwKey(&w, L"offsetX"); JwInt(&w, c->def.offsetX); JwRaw(&w, ",\n    ");
     JwKey(&w, L"offsetY"); JwInt(&w, c->def.offsetY); JwRaw(&w, ",\n    ");
     JwKey(&w, L"alpha");   JwInt(&w, c->def.alpha);   JwRaw(&w, ",\n    ");
-    JwKey(&w, L"shape");   JwStr(&w, CfgShapeName(c->def.shape)); JwRaw(&w, "\n  },\n\n  ");
+    JwKey(&w, L"shape");   JwStr(&w, CfgShapeName(c->def.shape));
+    /* defaults 段也要写 enabled/color/image：ReadState 会读它们，不写就是
+       "读进来、存回去就丢"。与 states 段一样按 have 位决定写不写。 */
+    if (c->def.have & SF_ENABLED) {
+        JwRaw(&w, ",\n    ");
+        JwKey(&w, L"enabled"); JwBool(&w, c->def.enabled);
+    }
+    if (c->def.have & SF_COLOR) {
+        WCHAR col[16];
+        FormatColor(c->def.rgb, col, 16);
+        JwRaw(&w, ",\n    ");
+        JwKey(&w, L"color"); JwStr(&w, col);
+    }
+    if (c->def.have & SF_IMAGE) {
+        JwRaw(&w, ",\n    ");
+        JwKey(&w, L"image"); JwStr(&w, c->def.image);
+    }
+    JwRaw(&w, "\n  },\n\n  ");
 
     JwKey(&w, L"states"); JwRaw(&w, "{\n");
     for (int i = 0; i < IMEST_COUNT; i++) {
@@ -882,7 +918,13 @@ int CfgSave(const ImeCfg* c) {
 
     FILE* f = NULL;
     if (_wfopen_s(&f, tmp, L"wb") != 0 || !f) { JwFree(&w); return 0; }
-    fwrite(w.p, 1, w.len, f);
+    /* 写盘失败（磁盘满/权限）不能继续改名覆盖正式配置，否则旧配置也没了 */
+    if (fwrite(w.p, 1, w.len, f) != w.len) {
+        fclose(f);
+        DeleteFileW(tmp);
+        JwFree(&w);
+        return 0;
+    }
     fclose(f);
     JwFree(&w);
 
@@ -904,15 +946,20 @@ void CfgLoad(ImeCfg* c) {
     if (!ReadJsonFile(path, c)) {         /* 有 JSON 就用它 */
         /* 没有 JSON：看看有没有旧 ini 可以迁移 */
         WCHAR ini[MAX_PATH];
-        IniPath(ini, MAX_PATH);
+        CfgIniPath(ini, MAX_PATH);
         OldIni old;
         if (ReadOldIni(ini, &old)) {
             MigrateFromOld(&old, c);
-            CfgSave(c);                       /* 立刻落盘成新格式 */
-            /* 旧文件改名保留，用户想回退还能找到 */
-            WCHAR bak[MAX_PATH];
-            _snwprintf_s(bak, MAX_PATH, _TRUNCATE, L"%s.bak", ini);
-            MoveFileExW(ini, bak, MOVEFILE_REPLACE_EXISTING);
+            /* 只有新格式落盘成功才把旧 ini 改名：写失败就留着 ini，
+               下次启动还能再迁一次，不至于两边都没有 */
+            if (CfgSave(c)) {
+                /* 旧文件改名保留，用户想回退还能找到 */
+                WCHAR bak[MAX_PATH];
+                _snwprintf_s(bak, MAX_PATH, _TRUNCATE, L"%s.bak", ini);
+                MoveFileExW(ini, bak, MOVEFILE_REPLACE_EXISTING);
+            } else {
+                DbgLog(L"迁移旧配置失败：CfgSave 未成功，保留 %s", ini);
+            }
         } else {
             /* 全新安装：写一份默认配置，方便用户出问题时查看 */
             CfgSave(c);

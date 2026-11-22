@@ -9,6 +9,10 @@ if errorlevel 1 exit /b 1
 
 if not exist "bin" mkdir bin
 if not exist "obj" mkdir obj
+rem Main and settings exes share several sources (config/json/shape/image); separate
+rem /Fo dirs so the settings build cannot overwrite the main build's .obj files.
+if not exist "obj\main" mkdir "obj\main"
+if not exist "obj\settings" mkdir "obj\settings"
 
 rem ===== Version = build date (auto-generated, only rewritten when changed) =====
 rem src\version.h is consumed by src\ime.rc (VERSIONINFO) and src\main.c
@@ -46,8 +50,11 @@ if errorlevel 1 (
 
 rem /W4: warn clean. /Brepro: reproducible build. /TP: compile as C++ so the
 rem COM / UIAutomation calls (p->Method()) compile without CINTERFACE macros.
+rem Library deps are declared by #pragma comment(lib) in the sources; the explicit
+rem list below is kept only as a fallback for libs that still lack a pragma
+rem (oleacc in caret.c, comdlg32 in settings.c). Duplicates are harmless.
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Foobj\ ^
+   /Foobj\main\ ^
    src\main.c src\config.c src\json.c src\ime.c src\caret.c src\wps.c src\bridge.c src\overlay.c src\shape.c src\image.c src\debug.c ^
    /link /OUT:bin/IMEIndicator.exe ^
    obj\ime.res ^
@@ -62,9 +69,11 @@ if errorlevel 1 (
 rem ===== Settings app =====
 rem Separate exe on purpose: the main program usually runs elevated, and the
 rem settings must be able to start unelevated to write the portable config.
+rem Same lib note as above: pragmas are the source of truth, list is a fallback.
+rem debug.c is needed because config.c calls DbgLog (migration failure path).
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
-   /Foobj\ ^
-   src\settings.c src\config.c src\json.c src\shape.c src\image.c src\uipaint.c ^
+   /Foobj\settings\ ^
+   src\settings.c src\config.c src\json.c src\shape.c src\image.c src\uipaint.c src\debug.c ^
    /link /OUT:bin/IMEIndicatorSettings.exe ^
    user32.lib gdi32.lib msimg32.lib shell32.lib comctl32.lib comdlg32.lib ole32.lib oleaut32.lib advapi32.lib windowscodecs.lib ^
    /SUBSYSTEM:WINDOWS
