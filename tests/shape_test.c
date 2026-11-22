@@ -81,8 +81,150 @@ static void TestTriangle(void) {
     CHECK(partial > 60, "三角形边缘有抗锯齿过渡");
 }
 
+static void TestSquare(void) {
+    printf("[3] 方形\n");
+    memset(g_buf, 0, sizeof(g_buf));
+    ShapeRasterize(g_buf, N, 0x00A000, 255, SHAPE_SQUARE);
+
+    double r = N / 2.0 - 0.5;
+    double want = 4.0 * r * r;
+    double got = CoveredArea();
+    printf("  面积 %.1f (理论 %.1f)\n", got, want);
+    CHECK(fabs(got - want) / want < 0.05, "方形面积接近 (2r)²");
+
+    CHECK(AlphaAt(N/2, N/2) == 255, "方形中心不透明");
+    /* 方形正好填满外接方形，四个角落在像素中心上：半覆盖，不是全透明 */
+    CHECK(AlphaAt(0, 0) > 0 && AlphaAt(0, 0) < 255, "方形左上角是边界过渡");
+    CHECK(AlphaAt(N-1, N-1) > 0 && AlphaAt(N-1, N-1) < 255, "方形右下角是边界过渡");
+    CHECK(AlphaAt(N/2, 2) > 200, "方形上边内部");
+    CHECK(AlphaAt(2, N/2) > 200, "方形左边内部");
+}
+
+static void TestDiamond(void) {
+    printf("[4] 菱形\n");
+    memset(g_buf, 0, sizeof(g_buf));
+    ShapeRasterize(g_buf, N, 0x00A000, 255, SHAPE_DIAMOND);
+
+    double r = N / 2.0 - 0.5;
+    double want = 2.0 * r * r;
+    double got = CoveredArea();
+    printf("  面积 %.1f (理论 %.1f)\n", got, want);
+    CHECK(fabs(got - want) / want < 0.05, "菱形面积接近 2r²");
+
+    CHECK(AlphaAt(N/2, N/2) == 255, "菱形中心不透明");
+    CHECK(AlphaAt(0, 0) == 0, "菱形左上角在外");
+    CHECK(AlphaAt(N/2, 2) > 200, "菱形上顶点附近");
+    CHECK(AlphaAt(2, N/2) > 200, "菱形左顶点附近");
+    CHECK(AlphaAt(N/2, N-3) > 200, "菱形下顶点附近");
+}
+
+static void TestRounded(void) {
+    printf("[5] 圆角方形\n");
+    memset(g_buf, 0, sizeof(g_buf));
+    ShapeRasterize(g_buf, N, 0x00A000, 255, SHAPE_ROUNDED);
+
+    double r = N / 2.0 - 0.5;
+    double cr = r * 0.5;
+    double want = 4.0 * r * r - (4.0 - 3.14159265) * cr * cr;
+    double got = CoveredArea();
+    printf("  面积 %.1f (理论 %.1f)\n", got, want);
+    CHECK(fabs(got - want) / want < 0.05, "圆角方形面积接近理论值");
+
+    CHECK(AlphaAt(N/2, N/2) == 255, "圆角方形中心不透明");
+    CHECK(AlphaAt(0, 0) == 0, "圆角方形左上角在外");
+    CHECK(AlphaAt(N/2, 2) > 200, "圆角方形上边内部");
+    CHECK(AlphaAt(2, N/2) > 200, "圆角方形左边内部");
+}
+
+static void TestHexagon(void) {
+    printf("[6] 六边形\n");
+    memset(g_buf, 0, sizeof(g_buf));
+    ShapeRasterize(g_buf, N, 0x00A000, 255, SHAPE_HEXAGON);
+
+    double r = N / 2.0 - 0.5;
+    double want = 2.598076211 * r * r;   /* (3√3/2)r² */
+    double got = CoveredArea();
+    printf("  面积 %.1f (理论 %.1f)\n", got, want);
+    CHECK(fabs(got - want) / want < 0.05, "六边形面积接近 (3√3/2)r²");
+
+    CHECK(AlphaAt(N/2, N/2) == 255, "六边形中心不透明");
+    CHECK(AlphaAt(0, 0) == 0, "六边形左上角在外");
+    CHECK(AlphaAt(N/2, 2) > 200, "六边形上顶点附近");
+    CHECK(AlphaAt(6, N/2) > 200, "六边形左边内部");
+}
+
+static void TestRing(void) {
+    printf("[7] 圆环\n");
+    memset(g_buf, 0, sizeof(g_buf));
+    ShapeRasterize(g_buf, N, 0x00A000, 255, SHAPE_RING);
+
+    double r = N / 2.0 - 0.5;
+    double inner = r * 0.7;
+    double want = 3.14159265 * (r * r - inner * inner);
+    double got = CoveredArea();
+    printf("  面积 %.1f (理论 %.1f)\n", got, want);
+    CHECK(fabs(got - want) / want < 0.05, "圆环面积接近 π(r²-inner²)");
+
+    CHECK(AlphaAt(N/2, N/2) == 0, "圆环中心是空的");
+    CHECK(AlphaAt(N/2, 2) > 200, "圆环上边有料");
+    CHECK(AlphaAt(2, N/2) > 200, "圆环左边有料");
+    CHECK(AlphaAt(0, 0) == 0, "圆环左上角在外");
+}
+
+static void TestSparkle(void) {
+    printf("[8] 四角星\n");
+    memset(g_buf, 0, sizeof(g_buf));
+    ShapeRasterize(g_buf, N, 0x00A000, 255, SHAPE_SPARKLE);
+
+    double r = N / 2.0 - 0.5;
+    /* 两个半轴 r × 0.35r 的菱形并集：4r²·t/(1+t)，t=0.35 */
+    double want = 4.0 * r * r * 0.35 / 1.35;
+    double got = CoveredArea();
+    printf("  面积 %.1f (理论 %.1f)\n", got, want);
+    CHECK(fabs(got - want) / want < 0.05, "四角星面积接近理论值");
+
+    CHECK(AlphaAt(N/2, N/2) == 255, "四角星中心不透明");
+    CHECK(AlphaAt(0, 0) == 0, "四角星左上角在外");
+    CHECK(AlphaAt(N/2, 6) > 200, "四角星上尖角附近");
+    CHECK(AlphaAt(6, N/2) > 200, "四角星左尖角附近");
+}
+
+static void TestSemicircle(void) {
+    printf("[9] 半圆\n");
+    memset(g_buf, 0, sizeof(g_buf));
+    ShapeRasterize(g_buf, N, 0x00A000, 255, SHAPE_SEMICIRCLE);
+
+    double r = N / 2.0 - 0.5;
+    double want = 3.14159265 * r * r * 0.5;
+    double got = CoveredArea();
+    printf("  面积 %.1f (理论 %.1f)\n", got, want);
+    CHECK(fabs(got - want) / want < 0.05, "半圆面积接近 πr²/2");
+
+    CHECK(AlphaAt(N/2, N/2) == 255, "半圆中心不透明");
+    CHECK(AlphaAt(0, 0) == 0, "半圆左上角在外");
+    CHECK(AlphaAt(N/2, N/2 + 14) > 200, "半圆下部内部");
+    CHECK(AlphaAt(N/2, N/2 - 18) == 0, "半圆平边上方为空");
+}
+
+static void TestTrapezoid(void) {
+    printf("[10] 梯形\n");
+    memset(g_buf, 0, sizeof(g_buf));
+    ShapeRasterize(g_buf, N, 0x00A000, 255, SHAPE_TRAPEZOID);
+
+    double r = N / 2.0 - 0.5;
+    double want = 3.0 * r * r;   /* (上宽 r + 下宽 2r)/2 × 高 2r */
+    double got = CoveredArea();
+    printf("  面积 %.1f (理论 %.1f)\n", got, want);
+    CHECK(fabs(got - want) / want < 0.05, "梯形面积接近 3r²");
+
+    CHECK(AlphaAt(N/2, N/2) == 255, "梯形中心不透明");
+    CHECK(AlphaAt(0, 0) == 0, "梯形左上角在外");
+    CHECK(AlphaAt(N/2, 2) > 200, "梯形上边内部");
+    CHECK(AlphaAt(N/2, N-3) > 200, "梯形下边内部");
+}
+
 static void TestPremultiply(void) {
-    printf("[3] 预乘与透明度\n");
+    printf("[11] 预乘与透明度\n");
     memset(g_buf, 0, sizeof(g_buf));
     ShapeRasterize(g_buf, N, 0xFF8000, 128, SHAPE_CIRCLE);
 
@@ -124,11 +266,27 @@ int main(int argc, char** argv) {
     if (argc > 1 && strcmp(argv[1], "--dump") == 0) {
         Dump(SHAPE_CIRCLE, "circle", 32);
         Dump(SHAPE_TRIANGLE, "triangle", 32);
+        Dump(SHAPE_SQUARE, "square", 32);
+        Dump(SHAPE_DIAMOND, "diamond", 32);
+        Dump(SHAPE_ROUNDED, "rounded_square", 32);
+        Dump(SHAPE_HEXAGON, "hexagon", 32);
+        Dump(SHAPE_RING, "ring", 32);
+        Dump(SHAPE_SPARKLE, "sparkle", 32);
+        Dump(SHAPE_SEMICIRCLE, "semicircle", 32);
+        Dump(SHAPE_TRAPEZOID, "trapezoid", 32);
         return 0;
     }
     printf("=== shape_test ===\n");
     TestCircle();
     TestTriangle();
+    TestSquare();
+    TestDiamond();
+    TestRounded();
+    TestHexagon();
+    TestRing();
+    TestSparkle();
+    TestSemicircle();
+    TestTrapezoid();
     TestPremultiply();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     if (g_fail) { printf("=== FAILED ===\n"); return 1; }

@@ -83,6 +83,14 @@ const WCHAR* CfgShapeName(int shape) {
     switch (shape) {
     case SHAPE_NONE:     return L"none";
     case SHAPE_TRIANGLE: return L"triangle";
+    case SHAPE_SQUARE:   return L"square";
+    case SHAPE_DIAMOND:  return L"diamond";
+    case SHAPE_ROUNDED:  return L"rounded_square";
+    case SHAPE_HEXAGON:  return L"hexagon";
+    case SHAPE_RING:     return L"ring";
+    case SHAPE_SPARKLE:    return L"sparkle";
+    case SHAPE_SEMICIRCLE: return L"semicircle";
+    case SHAPE_TRAPEZOID:  return L"trapezoid";
     case SHAPE_IMAGE:    return L"image";
     default:             return L"circle";
     }
@@ -93,6 +101,14 @@ int CfgShapeFromName(const WCHAR* name, int def) {
     if (_wcsicmp(name, L"none") == 0)     return SHAPE_NONE;
     if (_wcsicmp(name, L"circle") == 0)   return SHAPE_CIRCLE;
     if (_wcsicmp(name, L"triangle") == 0) return SHAPE_TRIANGLE;
+    if (_wcsicmp(name, L"square") == 0)   return SHAPE_SQUARE;
+    if (_wcsicmp(name, L"diamond") == 0)  return SHAPE_DIAMOND;
+    if (_wcsicmp(name, L"rounded_square") == 0) return SHAPE_ROUNDED;
+    if (_wcsicmp(name, L"hexagon") == 0)  return SHAPE_HEXAGON;
+    if (_wcsicmp(name, L"ring") == 0)     return SHAPE_RING;
+    if (_wcsicmp(name, L"sparkle") == 0)    return SHAPE_SPARKLE;
+    if (_wcsicmp(name, L"semicircle") == 0) return SHAPE_SEMICIRCLE;
+    if (_wcsicmp(name, L"trapezoid") == 0)  return SHAPE_TRAPEZOID;
     if (_wcsicmp(name, L"image") == 0)    return SHAPE_IMAGE;
     return def;
 }

@@ -9,7 +9,9 @@
 #include <windows.h>
 
 /* 把形状画进 size×size 的 32 位自上而下 DIB（BGRA 预乘 alpha）。
- * shape 取 SHAPE_CIRCLE / SHAPE_TRIANGLE（SHAPE_NONE / SHAPE_IMAGE 由调用方处理）。
+ * shape 取 SHAPE_CIRCLE / SHAPE_TRIANGLE / SHAPE_SQUARE / SHAPE_DIAMOND /
+ * SHAPE_ROUNDED / SHAPE_HEXAGON / SHAPE_RING / SHAPE_SPARKLE /
+ * SHAPE_SEMICIRCLE / SHAPE_TRAPEZOID（SHAPE_NONE / SHAPE_IMAGE 由调用方处理）。
  * rgb 是 0x00RRGGBB，alpha 是 0..255 的整体不透明度。 */
 void ShapeRasterize(BYTE* bgra, int size, DWORD rgb, int alpha, int shape);
 

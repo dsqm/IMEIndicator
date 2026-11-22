@@ -123,7 +123,10 @@ DPI 不同时以主屏为准。
 
 - **尺寸与偏移是逻辑像素**（96 DPI 基准），按光标所在显示器的 DPI 换算。
   旧版用物理像素，150% 屏上 20px 只有 13 逻辑像素，看起来偏小
-- 形状：`none`（不显示）/ `circle` / `triangle`（等边，尖角朝上）/ `image`。
+- 形状：`none`（不显示）/ `circle`（圆形）/ `semicircle`（半圆）/ `ring`（圆环）/
+  `rounded_square`（圆角方形）/ `square`（方形）/ `diamond`（菱形）/
+  `triangle`（等边三角形，尖角朝上）/ `trapezoid`（梯形，平顶）/
+  `hexagon`（六边形，尖角朝上）/ `sparkle`（四角星）/ `image`（自定义图片）。
   内置形状按同一个 `size` 算（外接方形边长），换形状不用重调尺寸
 - **自定义图片**：`shape: "image"` + `image: "文件名"`，图片放在
   `<exe 目录>\shapes\` 下。设置程序里点「图片…」选文件，会自动**复制**进

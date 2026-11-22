@@ -43,10 +43,18 @@ typedef enum {
 
 /* 形状。SHAPE_NONE = 该状态不显示（等价于旧版色值写 0）。
    SHAPE_IMAGE 用 shapes\ 下的图片，见 image.h。 */
-#define SHAPE_NONE     0
-#define SHAPE_CIRCLE   1   /* 实心圆（默认） */
-#define SHAPE_TRIANGLE 2   /* 等边三角形，尖角朝上 */
-#define SHAPE_IMAGE    3   /* 自定义图片（shapes\ 目录） */
+#define SHAPE_NONE       0
+#define SHAPE_CIRCLE     1   /* 实心圆（默认） */
+#define SHAPE_TRIANGLE   2   /* 等边三角形，尖角朝上 */
+#define SHAPE_SQUARE     3   /* 方形 */
+#define SHAPE_DIAMOND    4   /* 菱形 */
+#define SHAPE_ROUNDED    5   /* 圆角方形 */
+#define SHAPE_HEXAGON    6   /* 六边形，尖角朝上 */
+#define SHAPE_RING       7   /* 圆环 */
+#define SHAPE_SPARKLE    8   /* 四角星（两个细菱形取并集） */
+#define SHAPE_SEMICIRCLE 9   /* 半圆，平边朝上 */
+#define SHAPE_TRAPEZOID  10  /* 梯形，平顶 */
+#define SHAPE_IMAGE      11  /* 自定义图片（shapes\ 目录） */
 
 /* 每个状态可单独覆盖的字段。用位掩码记录"这一项用户显式设过"，
    没设过的才走继承/defaults —— 否则无法区分"用户就是要 20"和"默认是 20"。 */

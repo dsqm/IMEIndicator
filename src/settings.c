@@ -86,6 +86,19 @@ static unsigned CustomBit(int field) {
 #define PAGE_GLOBAL 5
 #define PAGE_IGNORE 6
 
+/* 形状下拉的顺序与标签：按视觉相似度排，图片放最后。
+   顺序与 SHAPE_* 枚举值无关，配置里存的是名字。 */
+static const int kShapeOrder[] = {
+    SHAPE_NONE, SHAPE_CIRCLE, SHAPE_SEMICIRCLE, SHAPE_RING, SHAPE_ROUNDED,
+    SHAPE_SQUARE, SHAPE_DIAMOND, SHAPE_TRIANGLE, SHAPE_TRAPEZOID,
+    SHAPE_HEXAGON, SHAPE_SPARKLE, SHAPE_IMAGE
+};
+static const WCHAR* const kShapeLabels[] = {
+    L"不显示", L"圆形", L"半圆", L"圆环", L"圆角方形",
+    L"方形", L"菱形", L"三角形", L"梯形", L"六边形", L"四角星", L"图片"
+};
+#define SHAPE_ORDER_COUNT (int)(sizeof(kShapeOrder) / sizeof(kShapeOrder[0]))
+
 /* 逻辑坐标（96 DPI 基准） */
 #define X0            14
 #define LX            (X0 + 6)
@@ -1363,10 +1376,8 @@ static void BuildStateBlock(int i, int y) {
     b->color = CColorBtn(rx + 80, y, 60, 22, i);
     b->lbl[1] = CLabel(L"形状", lx + 22, y + 4, 54, 20);
     b->shape = CCombo(lx + 80, y, 110, 180, i, F_SHAPE);
-    SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"不显示");
-    SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"圆");
-    SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"三角形");
-    SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"图片");
+    for (int k = 0; k < SHAPE_ORDER_COUNT; k++)
+        SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)kShapeLabels[k]);
     /* 「图片…」按钮：选文件 -> 复制进 shapes\ -> 形状自动切到图片。
        注册成 block=i 的控件，跟随基础状态时会被整块置灰。 */
     b->imgBtn = CreateWindowExW(0, L"BUTTON", L"图片…",
@@ -1482,10 +1493,10 @@ static void FillBlock(int i, ImeState s) {
 
     SendMessageW(b->enable, BM_SETCHECK, raw->enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(b->inherit, BM_SETCHECK, inherited ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(b->shape, CB_SETCURSEL,
-                 (eff.shape == SHAPE_NONE) ? 0 :
-                 (eff.shape == SHAPE_TRIANGLE) ? 2 :
-                 (eff.shape == SHAPE_IMAGE) ? 3 : 1, 0);
+    int shapeSel = 1;   /* 认不出就落到圆形 */
+    for (int k = 0; k < SHAPE_ORDER_COUNT; k++)
+        if (kShapeOrder[k] == eff.shape) { shapeSel = k; break; }
+    SendMessageW(b->shape, CB_SETCURSEL, shapeSel, 0);
 
     SetSliderPos(b->slSize, eff.size);
     SetSliderPos(b->slOffX, eff.offsetX);
@@ -1964,9 +1975,8 @@ static void CommitForm(void) {
             }
             if (inherited) continue;
             int sel = (int)SendMessageW(b->shape, CB_GETCURSEL, 0, 0);
-            int shape = (sel == 0) ? SHAPE_NONE :
-                        (sel == 2) ? SHAPE_TRIANGLE :
-                        (sel == 3) ? SHAPE_IMAGE : SHAPE_CIRCLE;
+            int shape = (sel >= 0 && sel < SHAPE_ORDER_COUNT)
+                            ? kShapeOrder[sel] : SHAPE_CIRCLE;
             raw->shape = shape;
             raw->have |= SF_SHAPE;
             if (shape != SHAPE_IMAGE) g_lastShape[s] = shape;
@@ -2417,9 +2427,8 @@ static void OnCommand(int id, HWND ctl) {
         ImeState s = g_blkState[m->block];
         if ((int)s < 0) return;
         int sel = (int)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
-        int shape = (sel == 0) ? SHAPE_NONE :
-                    (sel == 2) ? SHAPE_TRIANGLE :
-                    (sel == 3) ? SHAPE_IMAGE : SHAPE_CIRCLE;
+        int shape = (sel >= 0 && sel < SHAPE_ORDER_COUNT)
+                        ? kShapeOrder[sel] : SHAPE_CIRCLE;
         s_cfg.st[s].shape = shape;
         s_cfg.st[s].have |= SF_SHAPE;
         if (shape != SHAPE_IMAGE) g_lastShape[s] = shape;
