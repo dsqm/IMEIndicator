@@ -99,39 +99,13 @@ static void CommitForm(void) {
 }
 
 /* ---------- 脏标记 ----------
-   只比"值"，不比 have 位：勾选再取消、把数字改回原值都不算修改。
-   保存按钮与标题星号都跟着这个判断走。 */
+   判定逻辑在 settings_dirty.c（可单测）。这里只留基线与刷新。 */
 static ImeCfg g_base;
-
-static int StyleSame(const StateStyle* a, const StateStyle* b) {
-    return a->enabled == b->enabled && a->rgb == b->rgb && a->shape == b->shape &&
-           wcscmp(a->image, b->image) == 0 && a->size == b->size &&
-           a->offsetX == b->offsetX && a->offsetY == b->offsetY &&
-           a->alpha == b->alpha && a->transient == b->transient &&
-           a->inherit == b->inherit;
-}
-
-static int CfgSameValues(const ImeCfg* a, const ImeCfg* b) {
-    if (a->pollMs != b->pollMs || a->trackMs != b->trackMs ||
-        a->imeStrategy != b->imeStrategy ||
-        a->caretTimeoutMs != b->caretTimeoutMs ||
-        a->hideFullscreen != b->hideFullscreen ||
-        a->hideComposition != b->hideComposition ||
-        a->wpsCom != b->wpsCom || a->autoHideMs != b->autoHideMs)
-        return 0;
-    if (!StyleSame(&a->def, &b->def)) return 0;
-    for (int i = 0; i < IMEST_COUNT; i++)
-        if (!StyleSame(&a->st[i], &b->st[i])) return 0;
-    if (a->ignoreCount != b->ignoreCount) return 0;
-    for (int i = 0; i < a->ignoreCount; i++)
-        if (_wcsicmp(a->ignore[i], b->ignore[i]) != 0) return 0;
-    return 1;
-}
 
 static void RefreshDirty(void) {
     if (!g_hwnd) return;
     CommitForm();
-    g_dirty = !CfgSameValues(&s_cfg, &g_base);
+    g_dirty = !SettingsCfgSame(&s_cfg, &g_base);
 
     /* 只在真的变了才动标题与按钮：每次滚动都 SetWindowText/EnableWindow 一遍，
        即便值没变也会让非客户区与按钮重画，拖动滑块时看起来就是一直在闪。 */

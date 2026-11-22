@@ -71,7 +71,7 @@ rem Same lib note as above: pragmas are the source of truth.
 rem debug.c is needed because config.c calls DbgLog (migration failure path).
 cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Foobj\settings\ ^
-   src\settings.c src\settings_ui.c src\settings_pages.c src\config.c src\json.c src\shape.c src\image.c src\uipaint.c src\debug.c ^
+   src\settings.c src\settings_ui.c src\settings_pages.c src\settings_dirty.c src\config.c src\json.c src\shape.c src\image.c src\uipaint.c src\debug.c ^
    /link /OUT:bin/IMEIndicatorSettings.exe ^
    /SUBSYSTEM:WINDOWS
 

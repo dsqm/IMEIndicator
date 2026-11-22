@@ -163,6 +163,9 @@ extern const int kShapeOrder[12];
 extern const int kStateFields[4];
 extern const int kGlobalFields[4];
 
+/* settings_dirty.c：两份配置是否等价（决定保存按钮亮不亮） */
+int SettingsCfgSame(const ImeCfg* a, const ImeCfg* b);
+
 int DpiScale(int v);
 void ClientToWindowSize(RECT* rc, DWORD style, DWORD exstyle, UINT dpi);
 HFONT BaseFont(void);

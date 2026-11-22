@@ -33,6 +33,11 @@ rem links config.c as well -> needs debug.c for DbgLog
 call :run_test image_test "tests\image_test.c src\image.c src\config.c src\json.c src\debug.c" "user32.lib shell32.lib advapi32.lib ole32.lib windowscodecs.lib"
 if errorlevel 1 goto :fail
 
+rem ---- settings dirty check: whether the Save button lights up ----
+rem uses CfgDefaults -> link config.c (and its json/debug deps)
+call :run_test settings_dirty_test "tests\settings_dirty_test.c src\settings_dirty.c src\config.c src\json.c src\debug.c" "user32.lib shell32.lib advapi32.lib"
+if errorlevel 1 goto :fail
+
 echo [OK] all tests passed
 popd
 exit /b 0
