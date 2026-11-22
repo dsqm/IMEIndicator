@@ -1,4 +1,5 @@
 #include "settings_internal.h"
+#include "version.h"   /* 版本号 = 构建日期，与主程序同一份 */
 
 /* ================= IMEIndicator 设置程序 =================
    独立 exe，纯 Win32。分页表单（原型变体 C）：自定义页签 + 预览条 + 表单。
@@ -109,8 +110,10 @@ static void RefreshDirty(void) {
 
     /* 只在真的变了才动标题与按钮：每次滚动都 SetWindowText/EnableWindow 一遍，
        即便值没变也会让非客户区与按钮重画，拖动滑块时看起来就是一直在闪。 */
+    /* 标题带版本号：和主程序托盘提示里的 v2026.11.22 同一份（都来自 version.h） */
     WCHAR t[96];
-    _snwprintf_s(t, 96, _TRUNCATE, L"IMEIndicator 设置%s", g_dirty ? L" *" : L"");
+    _snwprintf_s(t, 96, _TRUNCATE, L"IMEIndicator 设置 v%s%s", IME_VER_W,
+                 g_dirty ? L" *" : L"");
     WCHAR cur[96];
     if (GetWindowTextW(g_hwnd, cur, 96) <= 0 || wcscmp(cur, t) != 0)
         SetWindowTextW(g_hwnd, t);

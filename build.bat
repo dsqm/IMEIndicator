@@ -48,6 +48,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem Settings app carries the same VERSIONINFO (same version.h) as the main exe.
+rc /nologo /fo obj\settings.res src\settings.rc
+if errorlevel 1 (
+    echo [ERROR] settings rc failed
+    exit /b 1
+)
+
 rem /W4: warn clean. /Brepro: reproducible build. /TP: compile as C++ so the
 rem COM / UIAutomation calls (p->Method()) compile without CINTERFACE macros.
 rem Library deps live in the sources as #pragma comment(lib) - single source of
@@ -73,6 +80,7 @@ cl /nologo /O2 /W4 /MT /utf-8 /DUNICODE /D_UNICODE /Brepro /TP /Isrc ^
    /Foobj\settings\ ^
    src\settings.c src\settings_ui.c src\settings_pages.c src\settings_dirty.c src\config.c src\json.c src\shape.c src\image.c src\uipaint.c src\debug.c ^
    /link /OUT:bin/IMEIndicatorSettings.exe ^
+   obj\settings.res ^
    /SUBSYSTEM:WINDOWS
 
 if errorlevel 1 (
