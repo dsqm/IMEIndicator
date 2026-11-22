@@ -4,6 +4,10 @@
 
 #pragma comment(lib, "msimg32.lib")
 
+/* 临时图层单边上限：界面元素最大也就几百像素，超过这个尺寸基本是调用方
+ * 传错了参数；直接拒绝，免得一次 CreateDIBSection 吃掉几十 MB 内存。 */
+#define UILAYER_MAX_DIM 4096
+
 /* 覆盖率光栅化：alpha = clamp(0.5 + 到边界的带符号距离, 0, 1)。
  * 像素中心正好压在边界上时得到 0.5，与面积覆盖的直觉一致；65000 像素围成的
  * 小圆也只多算一次 sqrt，比分倍采样更省。 */
@@ -134,7 +138,7 @@ void UIPixCapsule(BYTE* bgra, int w, int h,
 int UILayerBegin(UILayer* l, HDC ref, int w, int h) {
     if (!l) return 0;
     ZeroMemory(l, sizeof(*l));
-    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return 0;
+    if (w <= 0 || h <= 0 || w > UILAYER_MAX_DIM || h > UILAYER_MAX_DIM) return 0;
 
     BITMAPINFO bmi;
     ZeroMemory(&bmi, sizeof(bmi));
