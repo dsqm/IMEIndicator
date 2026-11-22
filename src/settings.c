@@ -87,7 +87,11 @@ static unsigned CustomBit(int field) {
 #define PAGE_IGNORE 6
 
 /* 逻辑坐标（96 DPI 基准） */
-#define WIN_W      860
+#define X0            14
+#define LX            (X0 + 6)
+#define RX            (X0 + 428)   /* 右列：两列各 398 宽，列间距 24 */
+#define CONTENT_RIGHT (RX + 354 + 44)      /* 右列「重置」按钮右缘 */
+#define WIN_W         (CONTENT_RIGHT + 28) /* 内容 + 左右各 14 边距 */
 #define WIN_H      556
 #define TAB_X      14
 #define TAB_Y      8
@@ -1343,9 +1347,9 @@ static WCHAR kHintCustom[] = L"未勾选时，数值跟随「中文输入法 (cn
 
 static void BuildStateBlock(int i, int y) {
     Block* b = &g_blk[i];
-    const int x0 = 14;
-    const int lx = x0 + 6;
-    const int rx = x0 + 428;   /* 右列：两列各 398 宽，列间距 24 */
+    const int x0 = X0;
+    const int lx = LX;
+    const int rx = RX;
 
     b->title = CLabel(L"", lx, y + 2, 150, 20);
     SendMessageW(b->title, WM_SETFONT, (WPARAM)BoldFont(), TRUE);
@@ -1383,9 +1387,13 @@ static void BuildStateBlock(int i, int y) {
     };
     HWND* psl[4] = { &b->slSize, &b->slOffX, &b->slOffY, &b->slAlpha };
     HWND* pvl[4] = { &b->vSize,  &b->vOffX,  &b->vOffY,  &b->vAlpha };
+    /* 视觉排布：左列 尺寸/透明度，右列 偏移Y/偏移X —— 两个偏移放同一列方便一起调。
+       k 仍是字段下标（尺寸/偏移X/偏移Y/透明度），这里只换摆放位置。 */
+    static const int kSlot[4] = { 0, 3, 1, 2 };  /* k -> 槽位：0 左上, 1 右上, 2 左下, 3 右下 */
     for (int k = 0; k < 4; k++) {
-        int cx = (k % 2 == 0) ? lx : rx;
-        int cy = y + (k / 2) * 23;
+        int slot = kSlot[k];
+        int cx = (slot % 2 == 0) ? lx : rx;
+        int cy = y + (slot / 2) * 23;
         /* 行首一个**没有文字**的勾选框：不勾 = 跟随中文输入法(cn_cn)的这项值
            （滑块/数值/重置整行置灰），勾上 = 本状态单独设置。含义靠悬停气泡说明。
            挂在 block=i 上，整块跟随基础状态时会一起置灰。 */
@@ -2628,7 +2636,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         GetClientRect(h, &rc);
         MoveWindow(g_preview, S(PREVIEW_X), S(PREVIEW_Y),
                    rc.right - S(PREVIEW_X * 2), S(PREVIEW_H), TRUE);
-        int pw = rc.right - S(28);
+        int pw = rc.right - S(14);   /* 面板从 x=14 铺到客户区右缘，右列才不会被裁 */
         int ph = rc.bottom - S(CONTENT_Y) - S(BOTTOM_H) + S(4);
         MoveWindow(g_layoutPanel, S(14), S(CONTENT_Y), pw, ph, TRUE);
         MoveWindow(g_globalPanel, S(14), S(CONTENT_Y), pw, ph, TRUE);
