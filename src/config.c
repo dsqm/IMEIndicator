@@ -596,6 +596,20 @@ static int ReadOldIni(const WCHAR* path, OldIni* o) {
     return 1;
 }
 
+/* 旧版尺寸/偏移是物理像素；新版是 96 DPI 逻辑像素。迁移时按系统 DPI
+   折算，让主屏上的观感与旧版一致（多屏不同 DPI 无法用单一值完全还原）。 */
+int CfgOldPxToLogical(int px, UINT dpi) {
+    if (dpi == 0) dpi = 96;
+    return MulDiv(px, 96, (int)dpi);
+}
+
+static UINT SystemDpi(void) {
+    HDC dc = GetDC(NULL);
+    int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+    if (dc) ReleaseDC(NULL, dc);
+    return dpi > 0 ? (UINT)dpi : 96;
+}
+
 /* 把旧 ini 映射成新配置。 */
 static void MigrateFromOld(const OldIni* o, ImeCfg* c) {
     c->pollMs = o->pollMs;
@@ -607,10 +621,15 @@ static void MigrateFromOld(const OldIni* o, ImeCfg* c) {
     c->wpsCom = o->wpsCom;
     c->autoHideMs = o->autoHideMs;
 
-    c->def.size = o->size;
+    UINT dpi = SystemDpi();
+    int size = CfgOldPxToLogical(o->size, dpi);
+    int offX = CfgOldPxToLogical(o->offX, dpi);
+    int offY = CfgOldPxToLogical(o->offY, dpi);
+
+    c->def.size = size;
     c->def.shape = o->shape;
-    c->def.offsetX = o->offX;
-    c->def.offsetY = o->offY;
+    c->def.offsetX = offX;
+    c->def.offsetY = offY;
     c->def.alpha = o->alpha;
 
     /* CfgDefaults 已经把形状/尺寸/偏移/透明度物化到各状态；只改 defaults 的话，
@@ -621,9 +640,9 @@ static void MigrateFromOld(const OldIni* o, ImeCfg* c) {
         StateStyle* s = &c->st[i];
         if (s->inherit >= 0) continue;   /* 跟随基础状态：由基础状态兜底 */
         if (s->have & SF_SHAPE)   s->shape = o->shape;
-        if (s->have & SF_SIZE)    s->size = o->size;
-        if (s->have & SF_OFFSETX) s->offsetX = o->offX;
-        if (s->have & SF_OFFSETY) s->offsetY = o->offY;
+        if (s->have & SF_SIZE)    s->size = size;
+        if (s->have & SF_OFFSETX) s->offsetX = offX;
+        if (s->have & SF_OFFSETY) s->offsetY = offY;
         if (s->have & SF_ALPHA)   s->alpha = o->alpha;
     }
 

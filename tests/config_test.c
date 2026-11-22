@@ -369,24 +369,39 @@ static void TestMigrateOldIni(void) {
     CHECK(_wfopen_s(&f, ini, L"wb") == 0 && f != NULL, L"写入旧 ini");
     if (f) { fwrite(text, 1, strlen(text), f); fclose(f); }
 
+    /* 旧版是物理像素，迁移按系统 DPI 折算成逻辑像素 */
+    HDC dc = GetDC(NULL);
+    UINT dpi = dc ? (UINT)GetDeviceCaps(dc, LOGPIXELSY) : 96;
+    if (dc) ReleaseDC(NULL, dc);
+    if (dpi == 0) dpi = 96;
+    int expSize = CfgOldPxToLogical(30, dpi);
+    int expOffX = CfgOldPxToLogical(5, dpi);
+    int expOffY = CfgOldPxToLogical(-3, dpi);
+
     ImeCfg c;
     CfgLoad(&c);
-    CHECK_INT(c.def.size, 30, L"defaults 尺寸迁移");
+    CHECK_INT(c.def.size, expSize, L"defaults 尺寸迁移（按 DPI 折算）");
     CHECK_INT(c.def.shape, SHAPE_TRIANGLE, L"defaults 形状迁移");
-    CHECK_INT(c.def.offsetX, 5, L"defaults 偏移 X 迁移");
-    CHECK_INT(c.def.offsetY, -3, L"defaults 偏移 Y 迁移");
+    CHECK_INT(c.def.offsetX, expOffX, L"defaults 偏移 X 迁移（按 DPI 折算）");
+    CHECK_INT(c.def.offsetY, expOffY, L"defaults 偏移 Y 迁移（按 DPI 折算）");
     CHECK_INT(c.def.alpha, 200, L"defaults 透明度迁移");
 
     StateStyle us, cn;
     CfgStateStyle(&c, IMEST_US, &us);
     CfgStateStyle(&c, IMEST_CN_CN, &cn);
-    CHECK_INT(us.size, 30, L"美式尺寸取迁移值");
+    CHECK_INT(us.size, expSize, L"美式尺寸取迁移值");
     CHECK_INT(us.shape, SHAPE_TRIANGLE, L"美式形状取迁移值");
-    CHECK_INT(us.offsetX, 5, L"美式偏移 X 取迁移值");
-    CHECK_INT(us.offsetY, -3, L"美式偏移 Y 取迁移值");
+    CHECK_INT(us.offsetX, expOffX, L"美式偏移 X 取迁移值");
+    CHECK_INT(us.offsetY, expOffY, L"美式偏移 Y 取迁移值");
     CHECK_INT(us.alpha, 200, L"美式透明度取迁移值");
-    CHECK_INT(cn.size, 30, L"中文尺寸取迁移值");
+    CHECK_INT(cn.size, expSize, L"中文尺寸取迁移值");
     CHECK_INT(cn.shape, SHAPE_TRIANGLE, L"中文形状取迁移值");
+
+    /* 折算公式本身：96 DPI 不变，高 DPI 按比例缩小 */
+    CHECK_INT(CfgOldPxToLogical(20, 96), 20, L"96 DPI 不缩放");
+    CHECK_INT(CfgOldPxToLogical(20, 144), 13, L"150% 屏折算");
+    CHECK_INT(CfgOldPxToLogical(20, 192), 10, L"200% 屏折算");
+    CHECK_INT(CfgOldPxToLogical(-2, 144), -1, L"负偏移折算");
 
     /* 迁移后旧 ini 改名保留，JSON 已生成 */
     CHECK(GetFileAttributesW(bak) != INVALID_FILE_ATTRIBUTES, L"旧 ini 备份为 .bak");

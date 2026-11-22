@@ -110,11 +110,14 @@ JSON、把旧文件改名 `.ini.bak`。旧版 `Caps` 是独立状态，迁移时
 | `Colors.Caps` | 五个 `*_caps` 的 `color` |
 | `Colors.Jp` / `Kr` | `jp` / `kr` 的 `color` |
 | `Colors.Alpha` | `defaults.alpha` |
-| `Overlay.Size/Shape/OffsetX/OffsetY` | `defaults.*` |
+| `Overlay.Size/Shape/OffsetX/OffsetY` | `defaults.*`（Size/Offset 按系统 DPI 从物理像素折算成逻辑像素） |
 | `General.*` | `general.*` |
 | `AutoHideStates` | 对应状态的 `transient` |
 | 色值写 `0` | 该状态 `enabled: false` |
 | `[Ignore]` | `ignore[]` |
+
+旧版尺寸/偏移是物理像素，迁移时按系统 DPI 折算成 96 DPI 逻辑像素；多屏
+DPI 不同时以主屏为准。
 
 ## 显示规则
 

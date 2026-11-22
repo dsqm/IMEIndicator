@@ -115,6 +115,8 @@ void   CfgStateStyle(const ImeCfg* c, ImeState s, StateStyle* out);
 /* 尺寸/偏移/透明度是否"跟中文输入法(cn_cn)"：自己没显式设过、也没有整块继承。
    设置程序据此画每行的「自定义」勾选框；求值回落见 CfgStateStyle。 */
 int    CfgFieldFollowsCn(const ImeCfg* c, ImeState s, unsigned sfBit);
+/* 旧版物理像素 -> 新版逻辑像素（96 DPI 基准）。dpi=0 按 96。 */
+int    CfgOldPxToLogical(int px, UINT dpi);
 const WCHAR* CfgStateName(ImeState s);  /* "cn_cn" 这类 JSON 键名 */
 int    CfgStateFromName(const WCHAR* name); /* 反查；认不出返回 -1 */
 const WCHAR* CfgShapeName(int shape);   /* "circle" / "triangle" / "none" / "image" */
