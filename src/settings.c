@@ -10,6 +10,7 @@
 #include <commdlg.h>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")  /* GetOpenFileName / ChooseColor */
 #pragma comment(lib, "msimg32.lib")   /* AlphaBlend：预览贴抗锯齿图形用 */
 
 /* ================= IMEIndicator 设置程序 =================

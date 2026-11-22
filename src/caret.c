@@ -5,6 +5,8 @@
 #include <oleauto.h>
 #include <oleacc.h>   /* MSAA：AccessibleObjectFromWindow + accLocation */
 
+#pragma comment(lib, "oleacc.lib")   /* 库依赖以源码 pragma 为准，构建脚本不再重复列 */
+
 /* ================= 光标位置检测（多级策略） =================
    顺序（见 CaretProbeOnce 里的 TRY_CHANNEL 链）：
    0) WPS 系（拆到 wps.c：文字走 Word、演示走 PowerPoint 的对象模型 COM；
