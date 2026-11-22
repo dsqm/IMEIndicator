@@ -1357,11 +1357,12 @@ static void BuildStateBlock(int i, int y) {
     b->inherit = CCheck(L"跟随基础状态", lx + 220, y, 120, 22, i, F_INHERIT, 0);
     y += 24;
 
-    b->lbl[0] = CLabel(L"颜色", lx, y + 4, 54, 20);
+    /* 形状在左、颜色在右；标签与下面数值行的标签对齐（cx + 22） */
+    b->lbl[0] = CLabel(L"颜色", rx + 22, y + 4, 54, 20);
     g_colorLabel[i] = b->lbl[0];
-    b->color = CColorBtn(lx + 58, y, 60, 22, i);
-    b->lbl[1] = CLabel(L"形状", rx, y + 4, 54, 20);
-    b->shape = CCombo(rx + 58, y, 110, 180, i, F_SHAPE);
+    b->color = CColorBtn(rx + 80, y, 60, 22, i);
+    b->lbl[1] = CLabel(L"形状", lx + 22, y + 4, 54, 20);
+    b->shape = CCombo(lx + 80, y, 110, 180, i, F_SHAPE);
     SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"不显示");
     SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"圆");
     SendMessageW(b->shape, CB_ADDSTRING, 0, (LPARAM)L"三角形");
@@ -1370,12 +1371,12 @@ static void BuildStateBlock(int i, int y) {
        注册成 block=i 的控件，跟随基础状态时会被整块置灰。 */
     b->imgBtn = CreateWindowExW(0, L"BUTTON", L"图片…",
                                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                rx + 174, y, 76, 22, P,
+                                lx + 196, y, 76, 22, P,
                                 (HMENU)(INT_PTR)(ID_PICK_IMAGE + i), NULL, NULL);
     SendMessageW(b->imgBtn, WM_SETFONT, (WPARAM)BaseFont(), TRUE);
     MakePushButton(b->imgBtn);
-    RegMeta(b->imgBtn, i, 0, NULL, rx + 174, y, 76, 22);
-    b->imgLabel = CLabel(L"", rx + 256, y + 4, 140, 20);
+    RegMeta(b->imgBtn, i, 0, NULL, lx + 196, y, 76, 22);
+    b->imgLabel = CLabel(L"", lx + 278, y + 4, 120, 20);
     g_imgLabel[i] = b->imgLabel;
     y += 26;
 
