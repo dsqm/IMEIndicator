@@ -314,12 +314,6 @@ static int ViaFlutterAnchor(CaretPos* out) {
     return 1;
 }
 
-/* 焦点是否在 Flutter 视图上。main.c 用：caret 死亡后 Flutter 再没有
-   "光标移动"这种临时显示的自然由头，组合窗收起（上屏/取消）时补一次。 */
-int CaretFocusIsFlutterView(void) {
-    return FocusIsFlutterView(ImeFocusedWindow());
-}
-
 /* 方法1：前台线程的 caret 矩形（GetGUIThreadInfo 可跨进程读） */
 static int ViaGuiInfo(CaretPos* out) {
     HWND fg = GetForegroundWindow();

@@ -615,11 +615,6 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
         }
         if (!occluded && wasOccl) {
             occlEndAt = now;   /* 遮挡结束：上屏或取消 */
-            /* Flutter：caret 在首次上屏后被引擎销毁且不再重建（见 caret.c
-               ViaFlutterAnchor 注释），之后不再有"光标移动"当临时显示的
-               自然由头 —— 组合窗收起本身就是一次该亮的由头，与普通程序里
-               上屏 caret 前跳触发重闪对齐。 */
-            if (CaretFocusIsFlutterView()) ahAt = now;
         }
         wasOccl = occluded;
 

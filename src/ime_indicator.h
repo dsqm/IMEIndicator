@@ -197,7 +197,6 @@ void   CaretWorkerStop(void);             /* 通知线程退出并回收（最�
    返回 1 时 out 里是屏幕物理像素坐标。 */
 int    CaretGetPosEx(CaretPos* out, int* timeoutOut);
 int    CaretIsForegroundFullscreen(void); /* 前景窗口是否全屏（日志诊断用） */
-int    CaretFocusIsFlutterView(void);  /* 焦点控件是否为 Flutter 视图（main.c 组合收起时补"亮一下"用） */
 
 /* ---- overlay.c ---- */
 void   OverlayInit(void);           /* 创建透明悬浮窗（需在含消息循环的线程）*/
