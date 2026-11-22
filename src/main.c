@@ -23,6 +23,13 @@ volatile LONG g_showDot = 0;
 #define IDM_GITHUB  1005
 #define IDM_OPENCFGDIR 1006
 
+/* 键盘布局主语言（ImeKeyboardLang 的返回值）。原来散在检测循环里当魔法数，
+   提成宏后一眼能看出分支对应哪种语言。 */
+#define LANG_ZH 0x04   /* 中文输入法 */
+#define LANG_EN 0x09   /* 美式键盘 */
+#define LANG_JA 0x11   /* 日文 */
+#define LANG_KO 0x12   /* 韩文 */
+
 /* 托盘图标重试 */
 #define IDT_TRAY_RETRY   1
 #define TRAY_MAX_RETRY   5
@@ -149,11 +156,13 @@ static HWND  g_bpHwnd    = NULL;
 static DWORD g_bpPid     = 0;
 static int   g_bpBlocked = 0;
 
-static int GetFocusProcessName(HWND focus, WCHAR* out, size_t cap) {
-    if (!focus || !out || cap == 0) return 0;
+/* 取窗口所属进程的 exe 文件名（不含目录）。受保护进程 OpenProcess 被拒时返回 0。
+   GetFocusProcessName 与 FgDesc 原来各写一遍这段，抽出来共用，避免两处逻辑走样。 */
+static int ProcBaseName(HWND wnd, WCHAR* out, size_t cap) {
+    if (!wnd || !out || cap == 0) return 0;
     out[0] = 0;
     DWORD pid = 0;
-    GetWindowThreadProcessId(focus, &pid);
+    GetWindowThreadProcessId(wnd, &pid);
     if (!pid) return 0;
     HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!hp) return 0;
@@ -176,7 +185,7 @@ static int CfgBlockedForeground(void) {
     if (!pid) return 0;
     if (w != g_bpHwnd || pid != g_bpPid) {
         WCHAR name[MAX_PATH];
-        g_bpBlocked = GetFocusProcessName(w, name, MAX_PATH)
+        g_bpBlocked = ProcBaseName(w, name, MAX_PATH)
                       ? CfgIsIgnored(&g_cfg, name) : 1;
         g_bpHwnd = w;
         g_bpPid = pid;
@@ -191,20 +200,7 @@ static void FgDesc(WCHAR* out, size_t cap) {
     if (!f) { _snwprintf_s(out, cap, _TRUNCATE, L"[null]"); return; }
     WCHAR cls[128] = L"", proc[MAX_PATH] = L"";
     GetClassNameW(f, cls, 128);
-    DWORD pid = 0;
-    GetWindowThreadProcessId(f, &pid);
-    if (pid) {
-        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (h) {
-            DWORD sz = MAX_PATH; WCHAR p[MAX_PATH];
-            if (QueryFullProcessImageNameW(h, 0, p, &sz)) {
-                WCHAR* s = p;
-                for (WCHAR* q = p; *q; q++) if (*q == L'\\') s = q + 1;
-                lstrcpynW(proc, s, MAX_PATH);
-            }
-            CloseHandle(h);
-        }
-    }
+    ProcBaseName(f, proc, MAX_PATH);   /* 进程名取不到就留空，不影响窗口类 */
     _snwprintf_s(out, cap, _TRUNCATE, L"[%s] %s", cls, proc);
 }
 
@@ -226,13 +222,17 @@ static void SingleInstanceRelease(void) {
     if (g_single) { CloseHandle(g_single); g_single = NULL; }
 }
 
-/* 重启：放掉单实例锁 -> 拉起一个继任者 -> 自己退出。
+/* 重启：拉起一个继任者 -> 放掉单实例锁 -> 自己退出。
    ★ 用 CreateProcessW 而不是 ShellExecuteW：后者要过一遍 shell，实测在
      某些环境下会在主线程上卡住（检测线程还在跑、主线程永远出不来）。
-     CreateProcess 直接落到底层，行为可预期。 */
+     CreateProcess 直接落到底层，行为可预期。
+   注意：spawn 失败不能退出 —— 旧实例退了、新实例没起来，用户就"程序没了"。 */
 static void RestartApp(void) {
     WCHAR exe[MAX_PATH];
-    if (GetModuleFileNameW(NULL, exe, MAX_PATH) > 0) {
+    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    /* 截断时 exe 没有终止符，后面 _snwprintf_s 会读越界；按 CfgDir 的方式兜底 */
+    if (n == 0 || n >= MAX_PATH) exe[0] = 0;
+    if (exe[0]) {
         WCHAR dir[MAX_PATH];
         _snwprintf_s(dir, MAX_PATH, _TRUNCATE, L"%s", exe);
         WCHAR* slash = wcsrchr(dir, L'\\');
@@ -241,22 +241,30 @@ static void RestartApp(void) {
         WCHAR cmd[MAX_PATH + 4];
         _snwprintf_s(cmd, MAX_PATH + 4, _TRUNCATE, L"\"%s\"", exe);
 
-        /* 先放互斥量再拉继任者：否则继任者抢先建锁、发现自己"已存在"直接退出 */
-        SingleInstanceRelease();
-
+        /* 继任者用 CREATE_SUSPENDED 建：先建好（此时它还没跑，不会抢单例锁），
+           再放锁、再 ResumeThread。否则放锁与 spawn 之间 --restart 可能起出两个实例。 */
         STARTUPINFOW si;
         PROCESS_INFORMATION pi;
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
         ZeroMemory(&pi, sizeof(pi));
-        BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi);
+        BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
+                                 CREATE_SUSPENDED, NULL, dir, &si, &pi);
         DbgLog(L"restart: spawn=%d err=%lu", ok ? 1 : 0, ok ? 0UL : GetLastError());
         if (ok) {
+            SingleInstanceRelease();   /* 继任者已挂起，放锁后它才能建锁成功 */
+            ResumeThread(pi.hThread);
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
+            PostQuitMessage(0);
+            return;
         }
+    } else {
+        DbgLog(L"restart: GetModuleFileNameW failed");
     }
-    PostQuitMessage(0);
+    /* 走到这里 = 没拉起来：不放锁、不退出，提示用户手动重启 */
+    MessageBoxW(NULL, L"重启失败，请手动重启。", L"IMEIndicator",
+                MB_ICONWARNING | MB_OK);
 }
 
 static BOOL TrayAddIcon(void);   /* 前向声明：explorer 重启时要重新挂图标 */
@@ -419,6 +427,15 @@ static int StateVisible(ImeState s) {
     return st.enabled && st.shape != SHAPE_NONE;
 }
 
+/* 重置探测结果：这些状态由键盘布局直接决定，没有"未定期"，必须一并清掉
+   （settling 残留会让 settleGate 永久闭合）。原来在检测循环里重复 5 次。 */
+static void ProbeReset(ImeProbe* pr) {
+    pr->ok = 0;
+    pr->opened = -1;
+    pr->conv = -1;
+    pr->settling = 0;
+}
+
 /* ---------- 检测线程 ---------- */
 
 /* 上屏宽限：浮窗消失（上屏/Esc）后的这段时间里，光标的前跳/回跳是输入法的
@@ -532,29 +549,29 @@ static DWORD WINAPI DetectorThread(LPVOID param) {
             if (lang < 0) {
                 /* 没有前台窗口：沿用上次状态，别去查（会读到自己） */
                 pr.settling = 0;
-            } else if (lang == 0x09) {          /* 美式键盘 */
+            } else if (lang == LANG_EN) {       /* 美式键盘 */
                 cur = caps ? IMEST_US_CAPS : IMEST_US;
-                pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
-            } else if (lang == 0x11) {          /* 日文 */
+                ProbeReset(&pr);
+            } else if (lang == LANG_JA) {       /* 日文 */
                 cur = caps ? IMEST_JP_CAPS : IMEST_JP;
-                pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
-            } else if (lang == 0x12) {          /* 韩文 */
+                ProbeReset(&pr);
+            } else if (lang == LANG_KO) {       /* 韩文 */
                 cur = caps ? IMEST_KR_CAPS : IMEST_KR;
-                pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
-            } else if (lang == 0x04) {          /* 中文输入法：要判中英 */
+                ProbeReset(&pr);
+            } else if (lang == LANG_ZH) {       /* 中文输入法：要判中英 */
                 if (caps) {
                     cur = IMEST_CN_CAPS;
-                    pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
+                    ProbeReset(&pr);
                 } else if (needMode) {
                     int cn = ImeIsChineseModeEx(&pr);
                     cur = cn ? IMEST_CN_CN : IMEST_CN_EN;
                 } else {
                     cur = IMEST_CN_CN;
-                    pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
+                    ProbeReset(&pr);
                 }
             } else {                            /* 其他布局（法/德等） */
                 cur = caps ? IMEST_OTHER_CAPS : IMEST_OTHER;
-                pr.ok = 0; pr.opened = -1; pr.conv = -1; pr.settling = 0;
+                ProbeReset(&pr);
             }
             if (cur != prev) {
                 stateChanged = 1;
@@ -804,7 +821,17 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     CaretWorkerStart(g_cfg.caretTimeoutMs);
 
     HANDLE th = CreateThread(NULL, 0, DetectorThread, NULL, 0, NULL);
-    if (!th) return 1;
+    if (!th) {
+        /* 线程没起来也要把已建好的资源收掉，否则互斥量/托盘/浮窗/查询线程全泄漏 */
+        DbgLog(L"start: CreateThread failed err=%lu", GetLastError());
+        CaretWorkerStop();
+        BrShutdown();
+        TrayRemove();
+        OverlayShutdown();
+        ImgShutdown();
+        SingleInstanceRelease();
+        return 1;
+    }
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
@@ -813,13 +840,20 @@ int WINAPI WinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE hPrev,
     }
 
     InterlockedExchange(&g_showDot, -1);   /* 通知 worker 退出 */
-    WaitForSingleObject(th, 1000);
+    /* 等 5 秒：检测线程可能卡在无超时的 ImeFloatOccluding 里，1 秒就 CloseHandle
+       并释放 Overlay/Img 会让它之后仍调 OverlayMove/ImgGet —— use-after-free。
+       只有确认线程已退出才释放这些资源；超时则跳过（进程退出由系统回收）。 */
+    DWORD wr = WaitForSingleObject(th, 5000);
     CloseHandle(th);
-    CaretWorkerStop();                     /* 检测线程已退出，此时回收查询线程 */
-    BrShutdown();                          /* 通知降权桥子进程收工（它也会自己看父进程） */
+    if (wr == WAIT_OBJECT_0) {
+        CaretWorkerStop();                 /* 检测线程已退出，此时回收查询线程 */
+        BrShutdown();                      /* 通知降权桥子进程收工（它也会自己看父进程） */
+        OverlayShutdown();
+        ImgShutdown();
+    } else {
+        DbgLog(L"exit: detector thread not stopped in 5s, skip resource teardown");
+    }
     TrayRemove();
-    OverlayShutdown();
-    ImgShutdown();
     SingleInstanceRelease();
     return 0;
 }
