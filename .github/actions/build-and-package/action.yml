@@ -1,0 +1,27 @@
+name: Build and package
+description: 构建两个 exe、跑单元测试、打成 IMEIndicator.zip
+
+# build / nightly / auto-release 三个 workflow 共用这一套步骤。
+# 以前是各写一份，加产物或改构建方式时容易漏改其中一处；集中到这里后只有一份。
+# 调用方只需先 actions/checkout，再 `uses: ./.github/actions/build-and-package`。
+
+runs:
+  using: composite
+  steps:
+    # exe 内嵌版本号取系统本地时间（build.bat 用 Get-Date），
+    # 先把时区设为中国标准时间，和 release/nightly 的构建日期保持一致。
+    - name: Set timezone to China Standard Time
+      shell: powershell
+      run: Set-TimeZone -Id "China Standard Time"
+
+    - name: Build
+      shell: cmd
+      run: call build.bat
+
+    - name: Test
+      shell: cmd
+      run: call test.bat
+
+    - name: Package
+      shell: powershell
+      run: Compress-Archive -Path bin/IMEIndicator.exe,bin/IMEIndicatorSettings.exe -DestinationPath IMEIndicator.zip -Force

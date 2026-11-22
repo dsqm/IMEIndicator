@@ -4,7 +4,7 @@ name: nightly
 #   - 每天北京时间 0 点（UTC 16:00）检查一次。
 #   - tag `nightly` 指向"上次真正构建过的提交"，它已经等于 HEAD 就什么都不做：
 #     不编译、不上传、不改说明。判断只看 ref（不看 Release 说明文字）。
-#   - 有新提交 → 构建 → 覆盖 exe、重写说明，最后再把 tag 移到这次构建的提交。
+#   - 有新提交 → 构建 → 覆盖 zip 资产、重写说明，最后再把 tag 移到这次构建的提交。
 #     tag 放最后：前面任何一步失败，tag 都还停在旧提交，下次运行会照常重来，
 #     不会出现"tag 说已经构建、产物却还是旧的"。
 #   - 若最新正式版比 nightly Release 晚发布，且这次确实有新内容
@@ -41,27 +41,9 @@ jobs:
             echo "go=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # exe 内嵌版本号取系统本地时间（build.bat 用 Get-Date），
-      # 先把时区设为中国标准时间，和说明里的构建日期保持一致。
-      - name: Set timezone to China Standard Time
+      # 构建 + 测试 + 打包三步在 composite action 里，三个 workflow 共用一份。
+      - uses: ./.github/actions/build-and-package
         if: steps.decide.outputs.go == 'true'
-        shell: powershell
-        run: Set-TimeZone -Id "China Standard Time"
-
-      - name: Build
-        if: steps.decide.outputs.go == 'true'
-        shell: cmd
-        run: call build.bat
-
-      - name: Test
-        if: steps.decide.outputs.go == 'true'
-        shell: cmd
-        run: call test.bat
-
-      - name: Package
-        if: steps.decide.outputs.go == 'true'
-        shell: powershell
-        run: Compress-Archive -Path bin/IMEIndicator.exe,bin/IMEIndicatorSettings.exe -DestinationPath IMEIndicator.zip -Force
 
       - name: Publish nightly release
         if: steps.decide.outputs.go == 'true'

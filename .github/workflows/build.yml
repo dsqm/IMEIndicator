@@ -13,23 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # exe 内嵌版本号取系统本地时间（build.bat 用 Get-Date），
-      # 先把时区设为中国标准时间，和 release/nightly 的构建日期保持一致。
-      - name: Set timezone to China Standard Time
-        shell: powershell
-        run: Set-TimeZone -Id "China Standard Time"
-
-      - name: Build
-        shell: cmd
-        run: call build.bat
-
-      - name: Test
-        shell: cmd
-        run: call test.bat
-
-      - name: Package
-        shell: powershell
-        run: Compress-Archive -Path bin/IMEIndicator.exe,bin/IMEIndicatorSettings.exe -DestinationPath IMEIndicator.zip -Force
+      # 构建 + 测试 + 打包三步在 composite action 里，三个 workflow 共用一份。
+      - uses: ./.github/actions/build-and-package
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

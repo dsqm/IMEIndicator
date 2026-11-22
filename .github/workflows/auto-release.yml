@@ -62,27 +62,9 @@ jobs:
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      # exe 内嵌版本号取系统本地时间（build.bat 用 Get-Date），
-      # 先把时区设为中国标准时间，和说明里的构建日期、tag 保持一致。
-      - name: Set timezone to China Standard Time
+      # 构建 + 测试 + 打包三步在 composite action 里，三个 workflow 共用一份。
+      - uses: ./.github/actions/build-and-package
         if: steps.decide.outputs.go == 'true'
-        shell: powershell
-        run: Set-TimeZone -Id "China Standard Time"
-
-      - name: Build
-        if: steps.decide.outputs.go == 'true'
-        shell: cmd
-        run: call build.bat
-
-      - name: Test
-        if: steps.decide.outputs.go == 'true'
-        shell: cmd
-        run: call test.bat
-
-      - name: Package
-        if: steps.decide.outputs.go == 'true'
-        shell: powershell
-        run: Compress-Archive -Path bin/IMEIndicator.exe,bin/IMEIndicatorSettings.exe -DestinationPath IMEIndicator.zip -Force
 
       - name: Create release
         if: steps.decide.outputs.go == 'true'
@@ -92,6 +74,7 @@ jobs:
           TAG: ${{ steps.decide.outputs.tag }}
         shell: bash
         run: |
+          set -euo pipefail
           repo="$GITHUB_REPOSITORY"
           ver="$VER"
           tag="$TAG"
@@ -99,7 +82,7 @@ jobs:
 
           # ---- 上一正式版（releases/latest 不含预发布）----
           stable=$(gh api "repos/$repo/releases/latest" 2>/dev/null || true)
-          stable_tag=$(echo "$stable" | jq -r '.tag_name // empty')
+          stable_tag=$(echo "$stable" | jq -r '.tag_name // empty' 2>/dev/null || true)
 
           # ---- 生成提交列表（最多 5 条，SHA 链接到 commit 页）----
           if [ -n "$stable_tag" ] && git rev-parse -q --verify "refs/tags/$stable_tag" >/dev/null; then
