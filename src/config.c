@@ -613,6 +613,20 @@ static void MigrateFromOld(const OldIni* o, ImeCfg* c) {
     c->def.offsetY = o->offY;
     c->def.alpha = o->alpha;
 
+    /* CfgDefaults 已经把形状/尺寸/偏移/透明度物化到各状态；只改 defaults 的话，
+       这些显式值会盖住 defaults，旧配置的 Size/Shape/Offset/Alpha 就丢了。
+       这里把物化过的字段一起改掉：形状所有非继承状态都有；尺寸/偏移/透明度
+       只有 cn_cn 物化（其余状态按设计跟随 cn_cn）。 */
+    for (int i = 0; i < IMEST_COUNT; i++) {
+        StateStyle* s = &c->st[i];
+        if (s->inherit >= 0) continue;   /* 跟随基础状态：由基础状态兜底 */
+        if (s->have & SF_SHAPE)   s->shape = o->shape;
+        if (s->have & SF_SIZE)    s->size = o->size;
+        if (s->have & SF_OFFSETX) s->offsetX = o->offX;
+        if (s->have & SF_OFFSETY) s->offsetY = o->offY;
+        if (s->have & SF_ALPHA)   s->alpha = o->alpha;
+    }
+
     /* 旧色值写 0 = 该状态不显示 -> enabled=0 */
     #define SET_COLOR(idx, rgbv, hidden) do { \
         c->st[idx].rgb = (rgbv); \

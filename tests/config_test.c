@@ -339,6 +339,62 @@ static void TestFollowCn(void) {
     CHECK_INT(jp2.size, 42, L"读回后仍取 cn_cn 的尺寸");
 }
 
+/* ---------- 9. 旧 ini 迁移 ---------- */
+/* 旧 ini 的 Size/Shape/OffsetX/OffsetY/Alpha 是全局值；迁移后必须落到
+ * defaults 与各状态的求值结果里，不能被 CfgDefaults 物化的内置值盖住。 */
+static void TestMigrateOldIni(void) {
+    wprintf(L"[9] 旧 ini 迁移\n");
+    WCHAR dir[MAX_PATH], json[MAX_PATH], ini[MAX_PATH], bak[MAX_PATH];
+    CfgDir(dir, MAX_PATH);
+    CfgPath(json, MAX_PATH);
+    _snwprintf_s(ini, MAX_PATH, _TRUNCATE, L"%s\\IMEIndicator.ini", dir);
+    _snwprintf_s(bak, MAX_PATH, _TRUNCATE, L"%s.bak", ini);
+    DeleteFileW(json);
+    DeleteFileW(bak);
+
+    const char* text =
+        "[General]\n"
+        "AutoHideMs = 1000\n"
+        "AutoHideStates = Cn\n"
+        "[Colors]\n"
+        "En = #FF0000\n"
+        "Cn = #00A000\n"
+        "Alpha = 200\n"
+        "[Overlay]\n"
+        "Size = 30\n"
+        "Shape = triangle\n"
+        "OffsetX = 5\n"
+        "OffsetY = -3\n";
+    FILE* f = NULL;
+    CHECK(_wfopen_s(&f, ini, L"wb") == 0 && f != NULL, L"写入旧 ini");
+    if (f) { fwrite(text, 1, strlen(text), f); fclose(f); }
+
+    ImeCfg c;
+    CfgLoad(&c);
+    CHECK_INT(c.def.size, 30, L"defaults 尺寸迁移");
+    CHECK_INT(c.def.shape, SHAPE_TRIANGLE, L"defaults 形状迁移");
+    CHECK_INT(c.def.offsetX, 5, L"defaults 偏移 X 迁移");
+    CHECK_INT(c.def.offsetY, -3, L"defaults 偏移 Y 迁移");
+    CHECK_INT(c.def.alpha, 200, L"defaults 透明度迁移");
+
+    StateStyle us, cn;
+    CfgStateStyle(&c, IMEST_US, &us);
+    CfgStateStyle(&c, IMEST_CN_CN, &cn);
+    CHECK_INT(us.size, 30, L"美式尺寸取迁移值");
+    CHECK_INT(us.shape, SHAPE_TRIANGLE, L"美式形状取迁移值");
+    CHECK_INT(us.offsetX, 5, L"美式偏移 X 取迁移值");
+    CHECK_INT(us.offsetY, -3, L"美式偏移 Y 取迁移值");
+    CHECK_INT(us.alpha, 200, L"美式透明度取迁移值");
+    CHECK_INT(cn.size, 30, L"中文尺寸取迁移值");
+    CHECK_INT(cn.shape, SHAPE_TRIANGLE, L"中文形状取迁移值");
+
+    /* 迁移后旧 ini 改名保留，JSON 已生成 */
+    CHECK(GetFileAttributesW(bak) != INVALID_FILE_ATTRIBUTES, L"旧 ini 备份为 .bak");
+    CHECK(GetFileAttributesW(json) != INVALID_FILE_ATTRIBUTES, L"已生成 JSON");
+    DeleteFileW(bak);
+    DeleteFileW(json);
+}
+
 int wmain(void) {
     /* 控制台按 UTF-8 输出：重定向到文件时也是 UTF-8，CI 日志里中文不乱码 */
     SetConsoleOutputCP(CP_UTF8);
@@ -355,6 +411,7 @@ int wmain(void) {
     TestDefaultConfig();
     TestMaterialize();
     TestFollowCn();
+    TestMigrateOldIni();
 
     wprintf(L"\n%d passed, %d failed\n", g_pass, g_fail);
     if (g_fail) { wprintf(L"=== FAILED ===\n"); return 1; }
