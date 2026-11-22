@@ -13,7 +13,7 @@
    手动丢进 shapes\ 的超限文件同样会被拒绝。 */
 #define IMG_MAX_FILE_BYTES (1024u * 1024u)        /* 单文件 1 MB */
 #define IMG_MAX_EDGE       4096u                  /* 单边像素 */
-#define IMG_MAX_PIXELS     (16u * 1024u * 1024u)  /* 总像素 1600 万 */
+#define IMG_MAX_PIXELS     16000000u              /* 总像素 1600 万（与 README 承诺一致） */
 
 /* 一张已缩放的图片：预乘 BGRA，自上而下，w*h*4 字节。
    指针归模块所有，下一次 ImgGet 可能让它失效 —— 调用方要立刻用掉。 */

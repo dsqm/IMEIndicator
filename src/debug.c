@@ -17,20 +17,38 @@ volatile LONG g_logging = 0;
 static WCHAR g_dir[MAX_PATH] = L"";
 static FILE*  g_fp = NULL;
 static CRITICAL_SECTION g_lock;
-static int    g_lockInit = 0;
+static volatile LONG g_lockInit = 0;   /* 0=未初始化 1=初始化中 2=可用 */
+
+/* 临界区只初始化一次。用 InterlockedCompareExchange 抢占初始化权，抢到的
+   线程初始化完把状态置 2，其他线程自旋等它完成 —— 原先「读 g_lockInit 再
+   赋值」没有同步，两个线程同时首次写日志会重复初始化。 */
+static void LockInit(void) {
+    if (g_lockInit == 2) return;
+    if (InterlockedCompareExchange(&g_lockInit, 1, 0) == 0) {
+        InitializeCriticalSection(&g_lock);
+        InterlockedExchange(&g_lockInit, 2);
+    } else {
+        while (g_lockInit != 2) Sleep(0);
+    }
+}
 
 void DbgInit(void) {
-    if (!g_lockInit) {
-        InitializeCriticalSection(&g_lock);
-        g_lockInit = 1;
-    }
+    LockInit();
     WCHAR exe[MAX_PATH]; DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
-    WCHAR* slash = NULL;
-    for (DWORD i = 0; i < n; i++) if (exe[i] == L'\\') slash = &exe[i];
-    if (slash) {
-        *slash = 0;
-        _snwprintf_s(g_dir, MAX_PATH, _TRUNCATE, L"%s", exe);
+    /* n==0：取不到 exe 路径，exe 内容未定义；n>=MAX_PATH：路径被截断且没有
+       终止符。两种都不能直接交给 _snwprintf_s 的 %s，先兜底/强制补终止符。 */
+    if (n == 0) {
+        lstrcpynW(exe, L".", MAX_PATH);
+        n = 1;
+    } else if (n >= MAX_PATH) {
+        exe[MAX_PATH - 1] = 0;
+        n = MAX_PATH - 1;
     }
+    WCHAR* slash = NULL;
+    /* 循环同时判 exe[i] 非 0：n 只是写入长度，异常时不能当终止符用 */
+    for (DWORD i = 0; i < n && exe[i]; i++) if (exe[i] == L'\\') slash = &exe[i];
+    if (slash) *slash = 0;
+    _snwprintf_s(g_dir, MAX_PATH, _TRUNCATE, L"%s", exe);
 }
 
 /* 单个日志文件上限：超了就换一个新文件（心跳 2 行/秒，开一整夜也不至于涨到几百 MB） */
@@ -67,7 +85,8 @@ static void DebugClose(void) {
 
 void DbgLog(const WCHAR* fmt, ...) {
     if (!g_logging) return;
-    if (g_lockInit) EnterCriticalSection(&g_lock);
+    LockInit();
+    EnterCriticalSection(&g_lock);
     if (!g_fp) DebugOpen();
     if (g_fp) {
         SYSTEMTIME st;
@@ -85,22 +104,24 @@ void DbgLog(const WCHAR* fmt, ...) {
         /* 到上限就换文件：关掉句柄，下次 DbgLog 会按新时间另开一个 */
         if (_ftelli64(g_fp) > DBG_MAX_BYTES) DebugClose();
     }
-    if (g_lockInit) LeaveCriticalSection(&g_lock);
+    LeaveCriticalSection(&g_lock);
 }
 
 void DbgShutdown(void) {
-    if (g_lockInit) {
+    /* 不 DeleteCriticalSection：另一线程可能正卡在 DbgLog 里，删掉正在使用的
+       临界区是未定义行为；进程退出时系统会回收。这里只关文件句柄并停掉日志。 */
+    if (g_lockInit == 2) {
         EnterCriticalSection(&g_lock);
         DebugClose();
         LeaveCriticalSection(&g_lock);
-        DeleteCriticalSection(&g_lock);
-        g_lockInit = 0;
     }
+    InterlockedExchange(&g_logging, 0);
 }
 
 /* 托盘关闭日志时释放文件句柄（否则文件一直被占用，无法删除/改名）。 */
 void DbgClose(void) {
-    if (g_lockInit) EnterCriticalSection(&g_lock);
+    LockInit();
+    EnterCriticalSection(&g_lock);
     DebugClose();
-    if (g_lockInit) LeaveCriticalSection(&g_lock);
+    LeaveCriticalSection(&g_lock);
 }

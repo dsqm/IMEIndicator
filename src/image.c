@@ -327,7 +327,10 @@ static Entry* LoadEntry(const WCHAR* name, WCHAR* err, size_t cap) {
 
 int ImgGet(const WCHAR* name, int targetPx, ImgView* out, WCHAR* err, size_t cap) {
     if (err && cap) err[0] = 0;
-    if (!out) return 0;
+    if (!out) {
+        SetErr(err, cap, L"内部错误：输出参数为空");
+        return 0;
+    }
     if (!name || !name[0]) {
         SetErr(err, cap, L"未选择图片");
         return 0;
@@ -351,10 +354,12 @@ int ImgGet(const WCHAR* name, int targetPx, ImgView* out, WCHAR* err, size_t cap
         int dw, dh;
         if (e->srcW >= e->srcH) {
             dw = targetPx;
-            dh = (int)((long long)e->srcH * targetPx / longEdge + 0.5);
+            /* 先整除再加 0.5 是死代码（整数除法已经把小数丢了），
+               改成「加半个除数再整除」才是真正的四舍五入。 */
+            dh = (int)(((long long)e->srcH * targetPx + longEdge / 2) / longEdge);
         } else {
             dh = targetPx;
-            dw = (int)((long long)e->srcW * targetPx / longEdge + 0.5);
+            dw = (int)(((long long)e->srcW * targetPx + longEdge / 2) / longEdge);
         }
         if (dw < 1) dw = 1;
         if (dh < 1) dh = 1;
@@ -424,18 +429,26 @@ static int SameFile(const WCHAR* a, const WCHAR* b) {
     LARGE_INTEGER sa, sb;
     if (GetFileSizeEx(ha, &sa) && GetFileSizeEx(hb, &sb) &&
         sa.QuadPart == sb.QuadPart) {
-        static BYTE ba[65536], bb[65536];
-        same = 1;
-        for (;;) {
-            DWORD ra = 0, rb = 0;
-            if (!ReadFile(ha, ba, sizeof(ba), &ra, NULL) ||
-                !ReadFile(hb, bb, sizeof(bb), &rb, NULL) ||
-                ra != rb || memcmp(ba, bb, ra) != 0) {
-                same = 0;
-                break;
+        /* 缓冲放堆上：原来的 static 缓冲不可重入，两个线程同时导入会互相踩。
+           64KB 放栈上偏大，malloc 更稳。 */
+        const DWORD kChunk = 65536;
+        BYTE* ba = (BYTE*)malloc(kChunk);
+        BYTE* bb = (BYTE*)malloc(kChunk);
+        if (ba && bb) {
+            same = 1;
+            for (;;) {
+                DWORD ra = 0, rb = 0;
+                if (!ReadFile(ha, ba, kChunk, &ra, NULL) ||
+                    !ReadFile(hb, bb, kChunk, &rb, NULL) ||
+                    ra != rb || memcmp(ba, bb, ra) != 0) {
+                    same = 0;
+                    break;
+                }
+                if (ra == 0) break;
             }
-            if (ra == 0) break;
         }
+        free(ba);
+        free(bb);
     }
     CloseHandle(ha);
     CloseHandle(hb);
@@ -445,7 +458,10 @@ static int SameFile(const WCHAR* a, const WCHAR* b) {
 int ImgImport(const WCHAR* srcPath, WCHAR* outName, size_t outCap,
               WCHAR* err, size_t errCap) {
     if (err && errCap) err[0] = 0;
-    if (!srcPath || !outName || outCap == 0) return 0;
+    if (!srcPath || !outName || outCap == 0) {
+        SetErr(err, errCap, L"内部错误：参数无效");
+        return 0;
+    }
 
     /* 先按文件大小挡一道：复制前就拒绝，别把大文件搬进 shapes\ */
     WIN32_FILE_ATTRIBUTE_DATA fa;

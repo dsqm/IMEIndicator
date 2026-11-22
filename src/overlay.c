@@ -42,6 +42,11 @@ static int     g_needPaint = 1;  /* 必须再 UpdateLayeredWindow 一次（如�
 static int     g_lastX = 0, g_lastY = 0;
 static int     g_havePos = 0;
 
+/* OverlayMove 本帧查到的图片视图。PaintDot 直接复用，避免每帧查两次表。
+   样式/尺寸变化时由 OverlayApply / OverlayMove 重新赋值或失效。 */
+static ImgView g_imgView;
+static int     g_haveImgView = 0;
+
 static LRESULT CALLBACK OverlayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_DESTROY) return 0;
     return DefWindowProcW(h, m, w, l);
@@ -92,10 +97,14 @@ void OverlaySetVisible(int visible) {
 }
 
 /* 逻辑像素 -> 物理像素。dpi=0 时按 96 处理。四舍五入，
-   避免 150% 下 20 被截断成 29。 */
+   避免 150% 下 20 被截断成 29。
+   ★ 负数要按「远离零」四舍五入：C 的整数除法向零截断，
+     (-2*144+48)/96 = -2，而正确值是 -3（偏移量可以是负的）。 */
 static int ScaleByDpi(int logical, UINT dpi) {
     if (dpi == 0) dpi = 96;
-    return (int)(((long long)logical * (long long)dpi + 48) / 96);
+    if (logical >= 0)
+        return (int)(((long long)logical * (long long)dpi + 48) / 96);
+    return -(int)(((long long)(-logical) * (long long)dpi + 48) / 96);
 }
 
 static UINT DpiAtPoint(int x, int y) {
@@ -126,6 +135,7 @@ void OverlayApply(const StateStyle* st) {
     g_style = *st;
     g_haveStyle = 1;
     g_bmpDirty = 1;
+    g_haveImgView = 0;   /* 样式变了（可能换了图/尺寸），缓存的图片视图作废 */
 }
 
 /* 按当前尺寸准备好 DIB Section（尺寸变了才重建）。
@@ -161,15 +171,20 @@ static int EnsureSurface(int w, int h) {
    （与设置程序预览共用同一份实现，保证"预览看到的 = 实际看到的"）。 */
 static void PaintDot(void) {
     if (g_shape == SHAPE_IMAGE) {
-        ImgView v;
-        if (ImgGet(g_style.image, g_pxTarget, &v, NULL, 0) &&
-            v.w == g_bmpW && v.h == g_bmpH) {
-            ImgBlit((BYTE*)g_bits, &v, g_alpha);
+        /* 直接用 OverlayMove 本帧查到的视图，不再重复 ImgGet（每帧只查一次表）。 */
+        if (g_haveImgView && g_imgView.w == g_bmpW && g_imgView.h == g_bmpH) {
+            ImgBlit((BYTE*)g_bits, &g_imgView, g_alpha);
             g_bmpDirty = 0;
             return;
         }
-        /* 图片在 OverlayMove 里已经确认可用；走到这里说明缓存被挤掉了，
-           退回圆点，别让指示器整个消失。 */
+        /* 视图失效（缓存被挤掉/换了图）：整块 DIB 清零后返回。
+           ★ 不能拿 g_bmpW 当 size 调 ShapeRasterize：它按 size*size*4 写，
+           图片非正方形时 DIB 只有 g_bmpW×g_bmpH，会越界写堆。
+           下一帧 OverlayMove 会发现 ImgGet 失败，把形状回退成圆点并重建
+           正方形 surface，指示器不会整个消失。 */
+        ZeroMemory(g_bits, (size_t)g_bmpW * g_bmpH * 4);
+        g_bmpDirty = 0;
+        return;
     }
     ShapeRasterize((BYTE*)g_bits, g_bmpW, g_style.rgb, g_alpha, g_shape);
     g_bmpDirty = 0;
@@ -190,11 +205,14 @@ void OverlayMove(int screenX, int baselineY) {
 
     int shape = g_style.shape;
     int pxW = pxSize, pxH = pxSize;
+    g_haveImgView = 0;
     if (shape == SHAPE_IMAGE) {
         ImgView v;
         if (ImgGet(g_style.image, pxSize, &v, NULL, 0)) {
             pxW = v.w;
             pxH = v.h;
+            g_imgView = v;          /* 存给 PaintDot 复用，省掉每帧第二次 ImgGet */
+            g_haveImgView = 1;
         } else {
             shape = SHAPE_CIRCLE;   /* 图片缺失/解码失败：回退圆点 */
         }
@@ -235,7 +253,15 @@ void OverlayMove(int screenX, int baselineY) {
     bf.BlendFlags = 0;
     bf.SourceConstantAlpha = 255;
     bf.AlphaFormat = AC_SRC_ALPHA;
-    UpdateLayeredWindow(g_hwnd, scr, &dst, &szw, g_mem, &src, 0, &bf, ULW_ALPHA);
+    /* 贴图失败（句柄失效/桌面切换等）时不能更新位置与重绘标志，
+       否则这一帧永远不再重试，圆点就卡在旧位置或干脆不显示。
+       把 g_bmpDirty 置回 1：若 g_needPaint 本来就是 0 且位置没变，
+       下一帧会被「什么都没变」的快速路径挡掉，必须靠它强制重试。 */
+    if (!UpdateLayeredWindow(g_hwnd, scr, &dst, &szw, g_mem, &src, 0, &bf, ULW_ALPHA)) {
+        g_bmpDirty = 1;
+        ReleaseDC(NULL, scr);
+        return;
+    }
     SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     ReleaseDC(NULL, scr);

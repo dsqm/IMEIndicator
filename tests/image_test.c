@@ -220,6 +220,24 @@ int main(void) {
         free(widePx);
     }
 
+    /* ---------- 清理 ----------
+       删掉本次生成的所有 png，保证测试可重复运行：否则下次导入会撞上上次
+       留下的 shapes\redblue.png，内容一变就变成 redblue_2.png，文件名与
+       「重名自动加序号」的断言都会失败。 */
+    DeleteFileW(srcPath);
+    DeleteFileW(altPath);
+    DeleteFileW(bigPath);
+    DeleteFileW(widePath);
+    {
+        WCHAR p[MAX_PATH];
+        _snwprintf_s(p, MAX_PATH, _TRUNCATE, L"%s\\redblue.png", shapes);
+        DeleteFileW(p);
+        _snwprintf_s(p, MAX_PATH, _TRUNCATE, L"%s\\redblue_2.png", shapes);
+        DeleteFileW(p);
+        _snwprintf_s(p, MAX_PATH, _TRUNCATE, L"%s\\wide.png", shapes);
+        DeleteFileW(p);
+    }
+
     ImgShutdown();
     if (SUCCEEDED(co)) CoUninitialize();
 
